@@ -266,7 +266,7 @@ endif ()
 find_package(Protobuf REQUIRED)
 
 set(PROTO_SRC ${LOG_PROTO_SOURCE_DIR})
-set(PROTO_NAME raft_log)
+set(PROTO_NAME log)
 execute_process(
 	COMMAND protoc ./${PROTO_NAME}.proto --cpp_out=./
 	WORKING_DIRECTORY ${PROTO_SRC}
@@ -292,7 +292,7 @@ set(LOG_LIB
         )
 
 add_library(logservice STATIC
-        ${LOG_PROTO_SOURCE_DIR}/raft_log.pb.cc
+        ${LOG_PROTO_SOURCE_DIR}/log.pb.cc
 	      ${LOG_PROTO_SOURCE_DIR}/log_agent.cpp
         ${LOG_SOURCE_DIR}/src/log_server.cpp
         ${LOG_SOURCE_DIR}/src/log_state_rocksdb_impl.cpp
