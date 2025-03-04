@@ -73,7 +73,7 @@ class ItemIterator
 {
 public:
     explicit ItemIterator(std::vector<Item::Pointer> &&item_list)
-        : ddl_list_(std::move(item_list)), ddl_idx_(0) {};
+        : ddl_list_(std::move(item_list)), ddl_idx_(0){};
     virtual ~ItemIterator() = default;
     ItemIterator(const ItemIterator &) = delete;
     void operator=(const ItemIterator &) = delete;
@@ -530,10 +530,11 @@ protected:
                 LOG(INFO) << "erasing schema op at clean stage after one hour, "
                              "commit_ts: "
                           << op.commit_ts_ << ", ckpt ts: " << ckpt_ts;
-                it = tx_catalog_ops_.erase(it);
 
                 uint64_t txn_to_delete = it->first;
                 uint64_t commit_ts_to_delete = op.commit_ts_;
+                it = tx_catalog_ops_.erase(it);
+
                 int rc = DeleteSchemaOp(txn_to_delete, commit_ts_to_delete);
                 while (rc != 0)
                 {
@@ -557,10 +558,11 @@ protected:
                 LOG(INFO) << "erasing range split op at clean stage after one "
                              "hour, commit_ts: "
                           << op.commit_ts_ << ", ckpt ts: " << ckpt_ts;
-                it = tx_split_range_ops_.erase(it);
 
                 uint64_t txn_to_delete = it->first;
                 uint64_t commit_ts_to_delete = op.commit_ts_;
+                it = tx_split_range_ops_.erase(it);
+
                 int rc = DeleteRangeOp(txn_to_delete, commit_ts_to_delete);
                 while (rc != 0)
                 {
