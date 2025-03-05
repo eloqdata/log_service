@@ -360,8 +360,8 @@ int LogStateRocksDBImpl::Start()
                                 value_slice,
                                 timestamp,
                                 tx_number,
-                                new_schema_stage,
                                 new_schema_op_msg);
+                    new_schema_stage = new_schema_op_msg.stage();
 
                     auto [it, success] = tx_catalog_ops_.try_emplace(
                         tx_number, new_schema_op_msg, timestamp);
@@ -381,12 +381,6 @@ int LogStateRocksDBImpl::Start()
                             existing_schema_op_msg.set_stage(new_schema_stage);
                         }
                     }
-                    else
-                    {
-                        assert(new_schema_stage ==
-                               SchemaOpMessage_Stage::
-                                   SchemaOpMessage_Stage_PrepareSchema);
-                    }
                 }
                 else if (static_cast<uint8_t>(last_char) == range_op_uint8)
                 {
@@ -394,8 +388,8 @@ int LogStateRocksDBImpl::Start()
                                 value_slice,
                                 timestamp,
                                 tx_number,
-                                new_range_stage,
                                 new_range_op_msg);
+                    new_range_stage = new_range_op_msg.stage();
 
                     auto [it_range, success_range] =
                         tx_split_range_ops_.try_emplace(
@@ -415,12 +409,6 @@ int LogStateRocksDBImpl::Start()
                         {
                             existing_range_op_msg.set_stage(new_range_stage);
                         }
-                    }
-                    else
-                    {
-                        assert(new_range_stage ==
-                               SplitRangeOpMessage_Stage::
-                                   SplitRangeOpMessage_Stage_PrepareSplit);
                     }
                 }
 
