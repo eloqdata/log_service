@@ -106,7 +106,6 @@ inline void Deserialize(rocksdb::Slice key,
                         rocksdb::Slice value,
                         uint64_t &timestamp,
                         uint64_t &tx_number,
-                        SchemaOpMessage_Stage &stage,
                         SchemaOpMessage &schema_op)
 {
     assert(key.size() == 17);
@@ -128,7 +127,6 @@ inline void Deserialize(rocksdb::Slice key,
                         rocksdb::Slice value,
                         uint64_t &timestamp,
                         uint64_t &tx_number,
-                        SplitRangeOpMessage_Stage &stage,
                         SplitRangeOpMessage &range_op)
 {
     assert(key.size() == 17);
