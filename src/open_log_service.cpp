@@ -26,6 +26,8 @@
 
 namespace txlog
 {
+thread_local size_t OpenLogServiceImpl::received_task_cnt_ = 0;
+
 void OpenLogServiceImpl::WriteLog(::google::protobuf::RpcController *controller,
                                   const LogRequest *request,
                                   LogResponse *response,
@@ -214,8 +216,8 @@ void OpenLogServiceImpl::SubmitAndWait(const LogRequest *req, LogResponse *resp)
     OpenLogServiceTask task{req, resp};
 
     assert(!workers_.empty());
-    size_t idx = task_counter_ % workers_.size();
-    ++task_counter_;
+    size_t idx = received_task_cnt_ % workers_.size();
+    ++received_task_cnt_;
     workers_[idx]->EnqueueTask(&task);
 
     std::unique_lock<bthread::Mutex> lk(task.mux_);

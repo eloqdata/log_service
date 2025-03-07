@@ -26,6 +26,8 @@
 #include <bthread/mutex.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -71,5 +73,10 @@ private:
     std::vector<std::thread> worker_threads_;
     std::atomic<bool> stop_worker_;
     LogState *log_state_;
+
+    // Added for condition variable implementation
+    std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+    std::atomic<uint32_t> task_cnt_{0};
 };
 }  // namespace txlog
