@@ -21,18 +21,15 @@
  */
 #include "open_log_task.h"
 
-#include <condition_variable>  // Include std::condition_variable
-#include <mutex>               // Include std::mutex
-#include <queue>               // Include std::queue
-#include <thread>              // Include std::thread
+#include <mutex>
+#include <thread>
 
 #include "log_state.h"
 #include "open_log_service.h"
 
 namespace txlog
 {
-OpenLogTaskWorker::OpenLogTaskWorker(size_t num_threads)
-    : producer_token_(task_queue_), stop_worker_(false)
+OpenLogTaskWorker::OpenLogTaskWorker(size_t num_threads) : stop_worker_(false)
 {
     for (size_t i = 0; i < num_threads; ++i)
     {
@@ -49,6 +46,10 @@ OpenLogTaskWorker::~OpenLogTaskWorker()
 void OpenLogTaskWorker::Shutdown()
 {
     stop_worker_.store(true, std::memory_order_release);
+
+    // Notify all waiting threads to check the stop flag
+    queue_cv_.notify_all();
+
     for (auto &thread : worker_threads_)
     {
         if (thread.joinable())
@@ -65,11 +66,11 @@ void OpenLogTaskWorker::WorkerThreadMain()
 
     while (!stop_worker_.load(std::memory_order_relaxed))
     {
-        // Try to dequeue multiple tasks at once
         size_t count = task_queue_.try_dequeue_bulk(tasks, MAX_BATCH_SIZE);
 
         if (count > 0)
         {
+            task_cnt_.fetch_sub(count, std::memory_order_relaxed);
             for (size_t i = 0; i < count; ++i)
             {
                 ProcessTask(tasks[i]);
@@ -77,7 +78,15 @@ void OpenLogTaskWorker::WorkerThreadMain()
         }
         else
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            // Wait for a task to be enqueued or for shutdown signal
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            queue_cv_.wait(
+                lock,
+                [this]()
+                {
+                    return stop_worker_.load(std::memory_order_relaxed) ||
+                           task_cnt_.load(std::memory_order_relaxed) > 0;
+                });
         }
     }
 }
@@ -170,7 +179,10 @@ void OpenLogTaskWorker::HandleUpdateCkptTs(const UpdateCheckpointTsRequest &req,
 
 void OpenLogTaskWorker::EnqueueTask(OpenLogServiceTask *task)
 {
-    task_queue_.enqueue(producer_token_, task);
+    task_queue_.enqueue(task);
+
+    task_cnt_.fetch_add(1, std::memory_order_relaxed);
+    queue_cv_.notify_one();
 }
 
 }  // namespace txlog

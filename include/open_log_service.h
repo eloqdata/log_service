@@ -131,7 +131,7 @@ public:
     {
     }
 
-    int Start(LogState *log_state, uint32_t worker_concurrency = 8);
+    int Start(LogState *log_state, uint32_t worker_concurrency = 4);
     void Shutdown();
 
     static void SetWriteLogErrorResponse(const WriteLogRequest &request,
@@ -142,7 +142,8 @@ private:
 
     const uint32_t log_group_id_;
     std::vector<std::unique_ptr<OpenLogTaskWorker>> workers_;
-    size_t task_counter_{0};
+    // received task counter per each LogService thread
+    static thread_local size_t received_task_cnt_;
 
     LogState *log_state_{nullptr};
     std::mutex log_replay_workers_mutex_;
