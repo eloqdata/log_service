@@ -27,6 +27,7 @@
 
 #include <atomic>
 #include <thread>
+#include <vector>
 
 #include "log.pb.h"
 
@@ -67,7 +68,6 @@ private:
                             LogResponse *resp);
 
     moodycamel::ConcurrentQueue<OpenLogServiceTask *> task_queue_;
-    moodycamel::ProducerToken producer_token_;
     std::vector<std::thread> worker_threads_;
     std::atomic<bool> stop_worker_;
     LogState *log_state_;

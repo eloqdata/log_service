@@ -21,18 +21,15 @@
  */
 #include "open_log_task.h"
 
-#include <condition_variable>  // Include std::condition_variable
-#include <mutex>               // Include std::mutex
-#include <queue>               // Include std::queue
-#include <thread>              // Include std::thread
+#include <mutex>
+#include <thread>
 
 #include "log_state.h"
 #include "open_log_service.h"
 
 namespace txlog
 {
-OpenLogTaskWorker::OpenLogTaskWorker(size_t num_threads)
-    : producer_token_(task_queue_), stop_worker_(false)
+OpenLogTaskWorker::OpenLogTaskWorker(size_t num_threads) : stop_worker_(false)
 {
     for (size_t i = 0; i < num_threads; ++i)
     {
@@ -65,7 +62,6 @@ void OpenLogTaskWorker::WorkerThreadMain()
 
     while (!stop_worker_.load(std::memory_order_relaxed))
     {
-        // Try to dequeue multiple tasks at once
         size_t count = task_queue_.try_dequeue_bulk(tasks, MAX_BATCH_SIZE);
 
         if (count > 0)
@@ -170,7 +166,7 @@ void OpenLogTaskWorker::HandleUpdateCkptTs(const UpdateCheckpointTsRequest &req,
 
 void OpenLogTaskWorker::EnqueueTask(OpenLogServiceTask *task)
 {
-    task_queue_.enqueue(producer_token_, task);
+    task_queue_.enqueue(task);
 }
 
 }  // namespace txlog

@@ -283,7 +283,6 @@ int LogStateRocksDBImpl::Start()
         meta_handle_ = cfhs[1];
     }
 
-    // TODO(ZX) refactor this block
     // Recover meta data from RocksDB to log_state
     {
         rocksdb::ReadOptions read_options;
