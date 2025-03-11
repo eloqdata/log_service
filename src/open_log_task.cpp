@@ -23,6 +23,8 @@
 
 #include <mutex>
 #include <thread>
+#include <tuple>
+#include <vector>
 
 #include "log_state.h"
 #include "open_log_service.h"
@@ -47,7 +49,9 @@ void OpenLogTaskWorker::Shutdown()
 {
     stop_worker_.store(true, std::memory_order_release);
 
-    // Notify all waiting threads to check the stop flag
+    {
+        std::unique_lock<std::mutex> lk(queue_mutex_);
+    }
     queue_cv_.notify_all();
 
     for (auto &thread : worker_threads_)
@@ -71,9 +75,100 @@ void OpenLogTaskWorker::WorkerThreadMain()
         if (count > 0)
         {
             task_cnt_.fetch_sub(count, std::memory_order_relaxed);
+
+            // First pass: collect all data log writes from across tasks
+            std::vector<std::tuple<uint64_t, uint64_t, std::string>> batch_logs;
+            // Keep track of which tasks have data logs to update their
+            // responses later
+            std::vector<std::pair<OpenLogServiceTask *, size_t>> data_log_tasks;
+
+            // First pass: identify data log tasks and collect writes
             for (size_t i = 0; i < count; ++i)
             {
-                ProcessTask(tasks[i]);
+                OpenLogServiceTask *task = tasks[i];
+                const LogRequest *req = task->req_;
+
+                // Only batch kDataLog requests
+                if (req->request_case() ==
+                        LogRequest::RequestCase::kWriteLogRequest &&
+                    req->write_log_request().log_content().content_case() ==
+                        LogContentMessage::ContentCase::kDataLog)
+                {
+                    const WriteLogRequest &write_req = req->write_log_request();
+                    const uint64_t timestamp = write_req.commit_timestamp();
+                    uint64_t txn = write_req.txn_number();
+                    const DataLogMessage &data_log =
+                        write_req.log_content().data_log();
+
+                    // Record where this task's data logs start in batch_logs
+                    size_t start_index = batch_logs.size();
+                    data_log_tasks.emplace_back(task, start_index);
+
+                    // Add all log entries from this task to the batch
+                    for (auto it = data_log.node_txn_logs().begin();
+                         it != data_log.node_txn_logs().end();
+                         ++it)
+                    {
+                        batch_logs.emplace_back(txn, timestamp, it->second);
+                    }
+                }
+            }
+
+            // Perform batch write if there are data logs
+            int batch_err = 0;
+            if (!batch_logs.empty())
+            {
+                batch_err = log_state_->AddLogItemBatch(batch_logs);
+            }
+
+            // Second pass: process all tasks and set responses
+            for (size_t i = 0; i < count; ++i)
+            {
+                OpenLogServiceTask *task = tasks[i];
+                const LogRequest *req = task->req_;
+                LogResponse *resp = task->resp_;
+
+                // Check if this is a data log task we've already batched
+                bool is_batched_data_log = false;
+                for (const auto &[dl_task, start_index] : data_log_tasks)
+                {
+                    if (dl_task == task)
+                    {
+                        is_batched_data_log = true;
+
+                        // For batched data logs, use the batch error code
+                        if (batch_err != 0)
+                        {
+                            OpenLogServiceImpl::SetWriteLogErrorResponse(
+                                req->write_log_request(), resp);
+                        }
+                        else
+                        {
+                            resp->set_response_status(
+                                LogResponse::ResponseStatus::
+                                    LogResponse_ResponseStatus_Success);
+                        }
+
+                        // Update latest committed transaction number
+                        uint32_t tx_ident =
+                            req->write_log_request().txn_number() & 0xFFFFFFFF;
+                        log_state_->UpdateLatestCommittedTxnNumber(tx_ident);
+                        break;
+                    }
+                }
+
+                // Process non-data log tasks normally
+                if (!is_batched_data_log)
+                {
+                    ProcessTask(task);
+                }
+                else
+                {
+                    // For batched tasks, we still need to notify when complete
+                    std::unique_lock<bthread::Mutex> lk(task->mux_);
+                    task->finished_ = true;
+                    task->cv_.notify_one();
+                }
             }
         }
         else
@@ -130,11 +225,16 @@ void OpenLogTaskWorker::HandleWriteLog(const WriteLogRequest &req,
     case LogContentMessage::ContentCase::kDataLog:
     {
         const DataLogMessage &data_log = log_content.data_log();
+
+        // Process individual data log entries - batching is now done at
+        // WorkerThreadMain level
         for (auto it = data_log.node_txn_logs().begin();
              it != data_log.node_txn_logs().end();
              ++it)
         {
             err = log_state_->AddLogItem(txn, timestamp, it->second);
+            if (err != 0)
+                break;
         }
         break;
     }
@@ -182,6 +282,10 @@ void OpenLogTaskWorker::EnqueueTask(OpenLogServiceTask *task)
     task_queue_.enqueue(task);
 
     task_cnt_.fetch_add(1, std::memory_order_relaxed);
+
+    {
+        std::unique_lock<std::mutex> lk(queue_mutex_);
+    }
     queue_cv_.notify_one();
 }
 
