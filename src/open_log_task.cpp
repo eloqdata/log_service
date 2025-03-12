@@ -47,10 +47,12 @@ OpenLogTaskWorker::~OpenLogTaskWorker()
 
 void OpenLogTaskWorker::Shutdown()
 {
-    stop_worker_.store(true, std::memory_order_release);
-
     {
+        // Even if the shared variable is atomic, it must be modified while
+        // owning the mutex to correctly publish the modification to the waiting
+        // thread. (https://en.cppreference.com/w/cpp/thread/condition_variable)
         std::unique_lock<std::mutex> lk(queue_mutex_);
+        stop_worker_.store(true, std::memory_order_release);
     }
     queue_cv_.notify_all();
 
@@ -281,10 +283,12 @@ void OpenLogTaskWorker::EnqueueTask(OpenLogServiceTask *task)
 {
     task_queue_.enqueue(task);
 
-    task_cnt_.fetch_add(1, std::memory_order_relaxed);
-
     {
+        // Even if the shared variable is atomic, it must be modified while
+        // owning the mutex to correctly publish the modification to the waiting
+        // thread.(https://en.cppreference.com/w/cpp/thread/condition_variable)
         std::unique_lock<std::mutex> lk(queue_mutex_);
+        task_cnt_.fetch_add(1, std::memory_order_relaxed);
     }
     queue_cv_.notify_one();
 }
