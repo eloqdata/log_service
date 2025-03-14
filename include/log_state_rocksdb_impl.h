@@ -365,6 +365,10 @@ public:
                    uint64_t timestamp,
                    const std::string &log_message) override;
 
+    int AddLogItemBatch(
+        const std::vector<std::tuple<uint64_t, uint64_t, std::string>>
+            &batch_logs);
+
     std::pair<bool, std::unique_ptr<ItemIterator>> GetLogReplayList(
         uint64_t start_timestamp) override;
 
