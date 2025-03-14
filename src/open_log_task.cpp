@@ -67,7 +67,7 @@ void OpenLogTaskWorker::Shutdown()
 
 void OpenLogTaskWorker::WorkerThreadMain()
 {
-    constexpr size_t MAX_BATCH_SIZE = 16;
+    constexpr size_t MAX_BATCH_SIZE = 256;
     OpenLogServiceTask *tasks[MAX_BATCH_SIZE];
 
     while (!stop_worker_.load(std::memory_order_relaxed))
