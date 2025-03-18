@@ -119,6 +119,20 @@ public:
                            uint64_t timestamp,
                            const std::string &log_message) = 0;
 
+    virtual int AddLogItemBatch(
+        const std::vector<std::tuple<uint64_t, uint64_t, std::string>>
+            &batch_logs)
+    {
+        int err = 0;
+        for (const auto &[tx, ts, log_message] : batch_logs)
+        {
+            err = AddLogItem(tx, ts, log_message);
+            if (err != 0)
+                break;
+        }
+        return err;
+    }
+
     virtual std::pair<bool, std::unique_ptr<ItemIterator>> GetLogReplayList(
         uint64_t start_timestamp) = 0;
 

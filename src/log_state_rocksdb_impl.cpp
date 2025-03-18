@@ -47,11 +47,34 @@ LogStateRocksDBImpl::LogStateRocksDBImpl(std::string rocksdb_path,
       rocksdb_storage_path_(std::move(rocksdb_path)),
       sst_files_size_limit_(sst_files_size_limit),
       rocksdb_scan_threads_(rocksdb_scan_threads),
-      last_purging_sst_ckpt_ts_(0){};
+      last_purging_sst_ckpt_ts_(0) {};
 
 LogStateRocksDBImpl::~LogStateRocksDBImpl()
 {
     StopRocksDB();
+}
+
+int LogStateRocksDBImpl::AddLogItemBatch(
+    const std::vector<std::tuple<uint64_t, uint64_t, std::string>> &batch_logs)
+{
+    rocksdb::WriteBatch batch;
+
+    for (const auto &[tx_number, timestamp, log_message] : batch_logs)
+    {
+        std::array<char, 16> key{};
+        Serialize(key, timestamp, tx_number);
+        batch.Put(rocksdb::Slice(key.data(), key.size()), log_message);
+    }
+
+    rocksdb::Status status = db_->Write(write_option_, &batch);
+    if (!status.ok())
+    {
+        LOG(ERROR) << "batch add log items failed: " << status.ToString()
+                   << ", RocksDB error code: " << (int) status.code()
+                   << ", batch size: " << batch_logs.size();
+    }
+
+    return (int) status.code();
 }
 
 int LogStateRocksDBImpl::AddLogItem(uint64_t tx_number,
@@ -283,7 +306,6 @@ int LogStateRocksDBImpl::Start()
         meta_handle_ = cfhs[1];
     }
 
-    // TODO(ZX) refactor this block
     // Recover meta data from RocksDB to log_state
     {
         rocksdb::ReadOptions read_options;
@@ -426,6 +448,7 @@ int LogStateRocksDBImpl::Start()
         }
     }
 
+    write_option_.disableWAL = false;
     write_option_.sync = true;
     LOG(INFO) << "The RocksDb log started.";
 
