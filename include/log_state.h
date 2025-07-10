@@ -253,9 +253,10 @@ public:
             SchemaOpMessage &schema_op_msg = catalog_it->second.schema_op_msg_;
             if (new_stage > schema_op_msg.stage())
             {
-                // For ADD INDEX operation.
+                // For the schema operation that need to deal with the data,
+                // such as ADD INDEX.
                 if (new_stage ==
-                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareSchema)
+                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData)
                 {
                     schema_op_msg.set_last_key_type(schema_op.last_key_type());
                     schema_op_msg.set_last_key_value(
@@ -287,14 +288,17 @@ public:
 
                 schema_op_msg.set_stage(new_stage);
             }
-            else if (new_stage == schema_op_msg.stage() &&
-                     new_stage == SchemaOpMessage_Stage::
-                                      SchemaOpMessage_Stage_PrepareSchema)
+            else if (new_stage == schema_op_msg.stage())
             {
-                schema_op_msg.set_last_key_type(schema_op.last_key_type());
-                schema_op_msg.set_last_key_value(schema_op.last_key_value());
-                schema_op_msg.set_new_catalog_blob(
-                    schema_op.new_catalog_blob());
+                if (new_stage ==
+                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData)
+                {
+                    schema_op_msg.set_last_key_type(schema_op.last_key_type());
+                    schema_op_msg.set_last_key_value(
+                        schema_op.last_key_value());
+                    schema_op_msg.set_new_catalog_blob(
+                        schema_op.new_catalog_blob());
+                }
             }
             else
             {
