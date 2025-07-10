@@ -260,6 +260,8 @@ public:
                 if (new_stage ==
                     SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData)
                 {
+                    SchemaOpMessage &schema_op_msg =
+                        *catalog_op.MutableSchemaOpMsg();
                     schema_op_msg.set_last_key_type(schema_op.last_key_type());
                     schema_op_msg.set_last_key_value(
                         schema_op.last_key_value());
@@ -362,6 +364,7 @@ public:
                           << ", ignore";
             }
         }
+    }
 
         std::pair<bool, SplitRangeOpMessage_Stage> SearchTxSplitRangeOp(
             uint64_t tx_number)
@@ -620,7 +623,7 @@ public:
                         << op.CommitTs() << ", ckpt ts: " << ckpt_ts;
 
                     uint64_t txn_to_delete = it->first;
-                    uint64_t commit_ts_to_delete = op.commit_ts_;
+                    uint64_t commit_ts_to_delete = op.CommitTs();
                     it = tx_catalog_ops_.erase(it);
 
                     int rc = DeleteSchemaOp(txn_to_delete, commit_ts_to_delete);
@@ -685,12 +688,12 @@ public:
         struct CatalogOp
         {
             CatalogOp(const SchemaOpMessage &schema_op, uint64_t commit_ts)
-                : schema_op_msg_({schema_op}), commit_ts_(commit_ts)
+                : schemas_op_msg_({schema_op}), commit_ts_(commit_ts)
             {
             }
 
             CatalogOp(SchemaOpMessage &&schema_op, uint64_t commit_ts)
-                : schema_op_msg_({std::move(schema_op)}), commit_ts_(commit_ts)
+                : schemas_op_msg_({std::move(schema_op)}), commit_ts_(commit_ts)
             {
             }
 

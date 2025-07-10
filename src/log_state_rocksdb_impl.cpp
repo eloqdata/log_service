@@ -395,12 +395,16 @@ int LogStateRocksDBImpl::Start()
 
                         // The schema operation has been logged. Only
                         // updates the stage.
-                        SchemaOpMessage &existing_schema_op_msg =
-                            catalog_it->second.schema_op_msg_;
-
-                        if (new_schema_stage > existing_schema_op_msg.stage())
+                        for (uint16_t idx = 0;
+                             idx < catalog_it->second.SchemaOpMsgCount();
+                             ++idx)
                         {
-                            existing_schema_op_msg.set_stage(new_schema_stage);
+                            SchemaOpMessage &msg =
+                                catalog_it->second.MutableSchemaOpMsg()[idx];
+                            if (new_schema_stage > msg.stage())
+                            {
+                                msg.set_stage(new_schema_stage);
+                            }
                         }
                     }
                 }
@@ -753,11 +757,14 @@ int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
     {
         auto catalog_it = tx_catalog_ops_.find(txn);
         assert(catalog_it != tx_catalog_ops_.end());
-        SchemaOpMessage &current_schema_op_msg =
-            catalog_it->second.schema_op_msg_;
-        current_schema_op_msg.set_stage(new_stage);
-        // only overwrite satge
-        schema_op_str = current_schema_op_msg.SerializeAsString();
+
+        for (uint16_t idx = 0; idx < catalog_it->second.SchemaOpMsgCount(); ++idx)
+        {
+            SchemaOpMessage &msg = catalog_it->second.MutableSchemaOpMsg()[idx];
+            msg.set_stage(new_stage);
+            // only overwrite satge
+            schema_op_str = msg.SerializeAsString();
+        }
     }
     else
     {
