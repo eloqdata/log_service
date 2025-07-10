@@ -285,7 +285,7 @@ public:
                 if (new_stage ==
                     SchemaOpMessage_Stage::SchemaOpMessage_Stage_CleanSchema)
                 {
-                    // For 2-PC DDL transactions, CatalogOp contains only
+                    // For pure DDL transactions, CatalogOp contains only
                     // one catalog image. For logical alter table DDL inside
                     // DML transactions, CatalogOp might contain multiple
                     // catalog images. Given one catalog, recovery for the
@@ -329,516 +329,559 @@ public:
         // be concurrent with SearchTxSchemaLog() in RecoverTx rpc thread
         std::unique_lock lk(log_state_mutex_);
 
-        SchemaOpMessage::Stage stage = schemas_op.at(0).stage();
-        if (stage == SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema)
+        assert(commit_ts > 0);
+
+        SchemaOpMessage::Stage new_stage = schemas_op.at(0).stage();
+        auto [it, success] =
+            tx_catalog_ops_.try_emplace(tx_no, schemas_op, commit_ts);
+        if (!success)
         {
-            auto [it, success] =
-                tx_catalog_ops_.try_emplace(tx_no, schemas_op, commit_ts);
-            if (!success)
+            CatalogOp &catalog_op = it->second;
+            SchemaOpMessage::Stage old_stage = catalog_op.SchemasOpStage();
+            if (new_stage > old_stage)
+            {
+                if (new_stage == SchemaOpMessage_Stage::
+                                     SchemaOpMessage_Stage_CommitSchema &&
+                    old_stage == SchemaOpMessage_Stage::
+                                     SchemaOpMessage_Stage_PrepareSchema)
+                {
+                    catalog_op.CommitAll();
+                }
+                else if (new_stage == SchemaOpMessage_Stage::
+                                          SchemaOpMessage_Stage_CleanSchema &&
+                         old_stage == SchemaOpMessage_Stage::
+                                          SchemaOpMessage_Stage_CommitSchema)
+                {
+                    catalog_op.ClearAll();
+                }
+            }
+            else
+
             {
                 LOG(INFO) << "duplicate commit log detected, txn: " << tx_no
                           << ", ignore";
             }
         }
-        else
+
+        std::pair<bool, SplitRangeOpMessage_Stage> SearchTxSplitRangeOp(
+            uint64_t tx_number)
         {
-            assert(stage == SchemaOpMessage_Stage_CleanSchema);
-            auto it = tx_catalog_ops_.find(tx_no);
-            if (it != tx_catalog_ops_.end())
+            // this func is called in RecoverTx rpc thread, might be concurrent
+            // with braft on_apply when processing WriteLogRequest
+            std::shared_lock s_lk(log_state_mutex_);
+            auto iter = tx_split_range_ops_.find(tx_number);
+            if (iter == tx_split_range_ops_.end())
             {
-                CatalogOp &catalog_op = it->second;
-                assert(schemas_op.at(0).table_name_str() ==
-                       catalog_op.MutableSchemaOpMsg()->table_name_str());
-                catalog_op.ClearAll();
+                return {false, SplitRangeOpMessage_Stage_Stage_MIN};
+            }
+            else
+            {
+                return {true, iter->second.split_range_op_message_.stage()};
             }
         }
-    }
 
-    std::pair<bool, SplitRangeOpMessage_Stage> SearchTxSplitRangeOp(
-        uint64_t tx_number)
-    {
-        // this func is called in RecoverTx rpc thread, might be concurrent with
-        // braft on_apply when processing WriteLogRequest
-        std::shared_lock s_lk(log_state_mutex_);
-        auto iter = tx_split_range_ops_.find(tx_number);
-        if (iter == tx_split_range_ops_.end())
+        void UpdateSplitRangeOp(
+            uint64_t tx_num,
+            uint64_t commit_ts,
+            const SplitRangeOpMessage &split_range_op_message)
         {
-            return {false, SplitRangeOpMessage_Stage_Stage_MIN};
-        }
-        else
-        {
-            return {true, iter->second.split_range_op_message_.stage()};
-        }
-    }
-
-    void UpdateSplitRangeOp(uint64_t tx_num,
-                            uint64_t commit_ts,
-                            const SplitRangeOpMessage &split_range_op_message)
-    {
-        int rc = PersistRangeOp(tx_num, commit_ts, split_range_op_message);
-        while (rc != 0)
-        {
-            rc = PersistRangeOp(tx_num, commit_ts, split_range_op_message);
-        }
-
-        std::unique_lock x_lk(log_state_mutex_);
-
-        SplitRangeOpMessage::Stage new_stage = split_range_op_message.stage();
-        // only insert new entry at prepare stage
-        if (new_stage ==
-            SplitRangeOpMessage_Stage::SplitRangeOpMessage_Stage_PrepareSplit)
-        {
-            auto [it, success] = tx_split_range_ops_.try_emplace(
-                tx_num, split_range_op_message, commit_ts);
-            if (!success)
+            int rc = PersistRangeOp(tx_num, commit_ts, split_range_op_message);
+            while (rc != 0)
             {
-                LOG(INFO) << "duplicate split range prepare log detected, txn: "
-                          << tx_num << ", ignore";
-                return;
-            }
-        }
-        else
-        {
-            auto split_range_op_it = tx_split_range_ops_.find(tx_num);
-
-            if (split_range_op_it == tx_split_range_ops_.end())
-            {
-                return;
+                rc = PersistRangeOp(tx_num, commit_ts, split_range_op_message);
             }
 
-            SplitRangeOpMessage &split_range_msg =
-                split_range_op_it->second.split_range_op_message_;
-            if (new_stage > split_range_msg.stage())
+            std::unique_lock x_lk(log_state_mutex_);
+
+            SplitRangeOpMessage::Stage new_stage =
+                split_range_op_message.stage();
+            // only insert new entry at prepare stage
+            if (new_stage == SplitRangeOpMessage_Stage::
+                                 SplitRangeOpMessage_Stage_PrepareSplit)
             {
-                if (new_stage == SplitRangeOpMessage_Stage::
-                                     SplitRangeOpMessage_Stage_CommitSplit)
+                auto [it, success] = tx_split_range_ops_.try_emplace(
+                    tx_num, split_range_op_message, commit_ts);
+                if (!success)
                 {
-                    // slice specs are just written in commit stage log.
-                    split_range_msg.clear_slice_keys();
-                    split_range_msg.clear_slice_sizes();
+                    LOG(INFO)
+                        << "duplicate split range prepare log detected, txn: "
+                        << tx_num << ", ignore";
+                    return;
+                }
+            }
+            else
+            {
+                auto split_range_op_it = tx_split_range_ops_.find(tx_num);
 
-                    assert(split_range_op_message.slice_keys_size() + 1 ==
-                           split_range_op_message.slice_sizes_size());
-                    int idx = 0;
-                    for (; idx < split_range_op_message.slice_keys_size();
-                         idx++)
+                if (split_range_op_it == tx_split_range_ops_.end())
+                {
+                    return;
+                }
+
+                SplitRangeOpMessage &split_range_msg =
+                    split_range_op_it->second.split_range_op_message_;
+                if (new_stage > split_range_msg.stage())
+                {
+                    if (new_stage == SplitRangeOpMessage_Stage::
+                                         SplitRangeOpMessage_Stage_CommitSplit)
                     {
-                        split_range_msg.add_slice_keys(
-                            split_range_op_message.slice_keys(idx));
+                        // slice specs are just written in commit stage log.
+                        split_range_msg.clear_slice_keys();
+                        split_range_msg.clear_slice_sizes();
+
+                        assert(split_range_op_message.slice_keys_size() + 1 ==
+                               split_range_op_message.slice_sizes_size());
+                        int idx = 0;
+                        for (; idx < split_range_op_message.slice_keys_size();
+                             idx++)
+                        {
+                            split_range_msg.add_slice_keys(
+                                split_range_op_message.slice_keys(idx));
+                            split_range_msg.add_slice_sizes(
+                                split_range_op_message.slice_sizes(idx));
+                        }
                         split_range_msg.add_slice_sizes(
                             split_range_op_message.slice_sizes(idx));
                     }
-                    split_range_msg.add_slice_sizes(
-                        split_range_op_message.slice_sizes(idx));
+                    else
+                    {
+                        // SplitRange logs at CleanSplit stage will be kept in
+                        // LogState for some time instead of be erased
+                        // immediately. This is to filter those retried stale
+                        // WriteLogRequest of previous stage (prepare log) yet
+                        // come to log service after clean log finished. The
+                        // SplitRange log will be erased when all node group's
+                        // ckpt_ts are one hour greater than its commit ts.
+                        assert(new_stage ==
+                               SplitRangeOpMessage_Stage::
+                                   SplitRangeOpMessage_Stage_CleanSplit);
+
+                        // Free the memory used by split_range_msg by overriding
+                        // it as split_range_msg.Clear() won't free the memory
+                        // used by message.
+                        split_range_op_it->second.split_range_op_message_ =
+                            SplitRangeOpMessage();
+                    }
+                    split_range_msg.set_stage(new_stage);
                 }
                 else
                 {
-                    // SplitRange logs at CleanSplit stage will be kept in
-                    // LogState for some time instead of be erased
-                    // immediately. This is to filter those retried stale
-                    // WriteLogRequest of previous stage (prepare log) yet
-                    // come to log service after clean log finished. The
-                    // SplitRange log will be erased when all node group's
-                    // ckpt_ts are one hour greater than its commit ts.
-                    assert(new_stage ==
-                           SplitRangeOpMessage_Stage::
-                               SplitRangeOpMessage_Stage_CleanSplit);
-
-                    // Free the memory used by split_range_msg by overriding
-                    // it as split_range_msg.Clear() won't free the memory
-                    // used by message.
-                    split_range_op_it->second.split_range_op_message_ =
-                        SplitRangeOpMessage();
-                }
-                split_range_msg.set_stage(new_stage);
-            }
-            else
-            {
-                LOG(INFO) << "duplicate split range log detected, txn: "
-                          << tx_num << ", stage: " << int(new_stage)
-                          << ", ignore";
-                return;
-            }
-        }
-    }
-
-    void CleanSplitRangeOps(uint64_t txn)
-    {
-        std::unique_lock x_lk(log_state_mutex_);
-        auto split_range_op_it = tx_split_range_ops_.find(txn);
-        if (split_range_op_it != tx_split_range_ops_.end())
-        {
-            tx_split_range_ops_.erase(split_range_op_it);
-        }
-    }
-
-    uint32_t LatestCommittedTxnNumber() const
-    {
-        return cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
-    }
-
-    void UpdateLatestCommittedTxnNumber(uint32_t tx_ident)
-    {
-        // to handle the situation that committed txn number wraps around
-        // uint32, assuming that active txn numbers won't span half of
-        // UINT32_MAX
-        if (tx_ident - cc_ng_info_.latest_txn_no_ < (UINT32_MAX >> 1))
-        {
-            cc_ng_info_.latest_txn_no_.store(tx_ident,
-                                             std::memory_order_relaxed);
-        }
-    }
-
-    void UpdateCkptTs(uint64_t timestamp)
-    {
-        std::atomic<uint64_t> &last_ckpt_ts = cc_ng_info_.last_ckpt_ts_;
-        uint64_t ts = last_ckpt_ts.load(std::memory_order_relaxed);
-        while (timestamp > ts)
-        {
-            if (last_ckpt_ts.compare_exchange_weak(
-                    ts, timestamp, std::memory_order_acq_rel))
-            {
-                TryCleanMultiStageOps();
-
-                uint32_t max_txn =
-                    cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
-
-                int rc = PersistCkptAndMaxTxn(ts, max_txn);
-                while (rc != 0)
-                {
-                    rc = PersistCkptAndMaxTxn(ts, max_txn);
-                }
-
-                break;
-            }
-        }
-    }
-
-    uint64_t LastCkptTimestamp()
-    {
-        return cc_ng_info_.last_ckpt_ts_.load(std::memory_order_relaxed);
-    }
-
-    CcNgInfo &GetCcNgInfo()
-    {
-        return cc_ng_info_;
-    }
-
-    virtual uint64_t GetApproximateReplayLogSize()
-    {
-        return 0;
-    };
-
-protected:
-    void GetSchemaOpList(std::vector<Item::Pointer> &res)
-    {
-        for (const auto &[txn, catalog_op] : tx_catalog_ops_)
-        {
-            for (uint16_t idx = 0; idx < catalog_op.SchemaOpMsgCount(); ++idx)
-            {
-                const SchemaOpMessage &msg = catalog_op.SchemaOpMsg()[idx];
-                if (msg.stage() !=
-                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_CleanSchema)
-                {
-                    std::string schema_op_str;
-                    msg.SerializeToString(&schema_op_str);
-                    res.emplace_back(
-                        std::make_shared<Item>(txn,
-                                               catalog_op.CommitTs(),
-                                               std::move(schema_op_str),
-                                               LogItemType::SchemaLog));
+                    LOG(INFO)
+                        << "duplicate split range log detected, txn: " << tx_num
+                        << ", stage: " << int(new_stage) << ", ignore";
+                    return;
                 }
             }
         }
-    }
 
-    void GetSplitRangeOpList(std::vector<Item::Pointer> &res)
-    {
-        for (const auto &[txn, split_range_op] : tx_split_range_ops_)
+        void CleanSplitRangeOps(uint64_t txn)
         {
-            if (split_range_op.split_range_op_message_.stage() ==
-                SplitRangeOpMessage_Stage::SplitRangeOpMessage_Stage_CleanSplit)
+            std::unique_lock x_lk(log_state_mutex_);
+            auto split_range_op_it = tx_split_range_ops_.find(txn);
+            if (split_range_op_it != tx_split_range_ops_.end())
             {
-                continue;
+                tx_split_range_ops_.erase(split_range_op_it);
             }
-            std::string split_range_op_str;
-            // Add table name firstly
-            std::string table_name =
-                split_range_op.split_range_op_message_.table_name();
-            uint8_t tabname_len = table_name.length();
-            const char *ptr = reinterpret_cast<const char *>(&tabname_len);
-            split_range_op_str.append(ptr, sizeof(uint8_t));
-            split_range_op_str.append(table_name.data(), tabname_len);
-            // then, add split range op
-            split_range_op.split_range_op_message_.AppendToString(
-                &split_range_op_str);
-
-            res.emplace_back(
-                std::make_shared<Item>(txn,
-                                       split_range_op.commit_ts_,
-                                       std::move(split_range_op_str),
-                                       LogItemType::SplitRangeLog));
         }
-    }
 
-    /**
-     * The multi-stage logs at clean stage will be erased when all
-     * node group's ckpt_ts are one hour greater than its commit ts.
-     */
-    void TryCleanMultiStageOps()
-    {
-        uint64_t ckpt_ts =
-            cc_ng_info_.last_ckpt_ts_.load(std::memory_order_relaxed);
-        using namespace std::chrono_literals;
-        uint64_t one_hour = std::chrono::microseconds(1h).count();
-        for (auto it = tx_catalog_ops_.begin(); it != tx_catalog_ops_.end();)
+        uint32_t LatestCommittedTxnNumber() const
         {
-            const CatalogOp &op = it->second;
-            auto stage = op.SchemasOpStage();
-            if (stage ==
-                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_CleanSchema &&
-                ckpt_ts > op.CommitTs() + one_hour)
+            return cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
+        }
+
+        void UpdateLatestCommittedTxnNumber(uint32_t tx_ident)
+        {
+            // to handle the situation that committed txn number wraps around
+            // uint32, assuming that active txn numbers won't span half of
+            // UINT32_MAX
+            if (tx_ident - cc_ng_info_.latest_txn_no_ < (UINT32_MAX >> 1))
             {
-                LOG(INFO) << "erasing schema op at clean stage after one hour, "
-                             "commit_ts: "
-                          << op.CommitTs() << ", ckpt ts: " << ckpt_ts;
+                cc_ng_info_.latest_txn_no_.store(tx_ident,
+                                                 std::memory_order_relaxed);
+            }
+        }
 
-                uint64_t txn_to_delete = it->first;
-                uint64_t commit_ts_to_delete = op.commit_ts_;
-                it = tx_catalog_ops_.erase(it);
-
-                int rc = DeleteSchemaOp(txn_to_delete, commit_ts_to_delete);
-                while (rc != 0)
+        void UpdateCkptTs(uint64_t timestamp)
+        {
+            std::atomic<uint64_t> &last_ckpt_ts = cc_ng_info_.last_ckpt_ts_;
+            uint64_t ts = last_ckpt_ts.load(std::memory_order_relaxed);
+            while (timestamp > ts)
+            {
+                if (last_ckpt_ts.compare_exchange_weak(
+                        ts, timestamp, std::memory_order_acq_rel))
                 {
-                    rc = DeleteSchemaOp(txn_to_delete, commit_ts_to_delete);
+                    TryCleanMultiStageOps();
+
+                    uint32_t max_txn = cc_ng_info_.latest_txn_no_.load(
+                        std::memory_order_relaxed);
+
+                    int rc = PersistCkptAndMaxTxn(ts, max_txn);
+                    while (rc != 0)
+                    {
+                        rc = PersistCkptAndMaxTxn(ts, max_txn);
+                    }
+
+                    break;
                 }
             }
-            else
-            {
-                it++;
-            }
         }
-        for (auto it = tx_split_range_ops_.begin();
-             it != tx_split_range_ops_.end();)
+
+        uint64_t LastCkptTimestamp()
         {
-            const SplitRangeOp &op = it->second;
-            auto stage = op.split_range_op_message_.stage();
-            if (stage == SplitRangeOpMessage_Stage::
-                             SplitRangeOpMessage_Stage_CleanSplit &&
-                ckpt_ts > op.commit_ts_ + one_hour)
+            return cc_ng_info_.last_ckpt_ts_.load(std::memory_order_relaxed);
+        }
+
+        CcNgInfo &GetCcNgInfo()
+        {
+            return cc_ng_info_;
+        }
+
+        virtual uint64_t GetApproximateReplayLogSize()
+        {
+            return 0;
+        };
+
+    protected:
+        void GetSchemaOpList(std::vector<Item::Pointer> & res)
+        {
+            for (const auto &[txn, catalog_op] : tx_catalog_ops_)
             {
-                LOG(INFO) << "erasing range split op at clean stage after one "
-                             "hour, commit_ts: "
-                          << op.commit_ts_ << ", ckpt ts: " << ckpt_ts;
-
-                uint64_t txn_to_delete = it->first;
-                uint64_t commit_ts_to_delete = op.commit_ts_;
-                it = tx_split_range_ops_.erase(it);
-
-                int rc = DeleteRangeOp(txn_to_delete, commit_ts_to_delete);
-                while (rc != 0)
+                for (uint16_t idx = 0; idx < catalog_op.SchemaOpMsgCount();
+                     ++idx)
                 {
-                    rc = DeleteRangeOp(txn_to_delete, commit_ts_to_delete);
+                    const SchemaOpMessage &msg = catalog_op.SchemaOpMsg()[idx];
+                    if (msg.stage() != SchemaOpMessage_Stage::
+                                           SchemaOpMessage_Stage_CleanSchema)
+                    {
+                        std::string schema_op_str;
+                        msg.SerializeToString(&schema_op_str);
+                        res.emplace_back(
+                            std::make_shared<Item>(txn,
+                                                   catalog_op.CommitTs(),
+                                                   std::move(schema_op_str),
+                                                   LogItemType::SchemaLog));
+                    }
                 }
             }
-            else
+        }
+
+        void GetSplitRangeOpList(std::vector<Item::Pointer> & res)
+        {
+            for (const auto &[txn, split_range_op] : tx_split_range_ops_)
             {
-                it++;
-            }
-        }
-    }
-
-    virtual int PersistSchemaOp(uint64_t txn,
-                                uint64_t timestamp,
-                                const SchemaOpMessage &schema_op) = 0;
-
-    virtual int DeleteSchemaOp(uint64_t txn, uint64_t timestamp) = 0;
-
-    virtual int PersistRangeOp(uint64_t txn,
-                               uint64_t timestamp,
-                               const SplitRangeOpMessage &range_op) = 0;
-
-    virtual int DeleteRangeOp(uint64_t txn, uint64_t timestamp) = 0;
-
-    virtual int PersistCkptAndMaxTxn(uint64_t ckpt_ts, uint32_t max_txn) = 0;
-
-    CcNgInfo cc_ng_info_;
-
-    struct CatalogOp
-    {
-        CatalogOp(const SchemaOpMessage &schema_op, uint64_t commit_ts)
-            : schema_op_msg_({schema_op}), commit_ts_(commit_ts)
-        {
-        }
-
-        CatalogOp(SchemaOpMessage &&schema_op, uint64_t commit_ts)
-            : schema_op_msg_({std::move(schema_op)}), commit_ts_(commit_ts)
-        {
-        }
-
-        CatalogOp(const ::google::protobuf::RepeatedPtrField<SchemaOpMessage>
-                      &schemas_op,
-                  uint64_t commit_ts)
-            : schemas_op_msg_(schemas_op.begin(), schemas_op.end()),
-              commit_ts_(commit_ts)
-        {
-        }
-
-        CatalogOp(std::vector<SchemaOpMessage> schemas_op, uint64_t commit_ts)
-            : schemas_op_msg_(std::move(schemas_op)), commit_ts_(commit_ts)
-        {
-        }
-        uint64_t CommitTs() const
-        {
-            return commit_ts_;
-        }
-
-        void SetCommitTs(uint64_t commit_ts)
-        {
-            commit_ts_ = commit_ts;
-        }
-
-        // If contains only one SchemaOpMessage, return its stage.
-        // If contains multiple SchemaOpMessage, return clean only when all
-        // clean and return commit otherwise.
-        SchemaOpMessage_Stage SchemasOpStage() const
-        {
-            if (schemas_op_msg_.size() == 1)
-            {
-                return schemas_op_msg_.front().stage();
-            }
-            else
-            {
-                // 1-PC stage is either commit or clean.
-                bool all_cleaned =
-                    std::all_of(schemas_op_msg_.begin(),
-                                schemas_op_msg_.end(),
-                                [](const SchemaOpMessage &schema_op_msg)
-                                {
-                                    return schema_op_msg.stage() ==
-                                           SchemaOpMessage_Stage_CleanSchema;
-                                });
-                if (all_cleaned)
+                if (split_range_op.split_range_op_message_.stage() ==
+                    SplitRangeOpMessage_Stage::
+                        SplitRangeOpMessage_Stage_CleanSplit)
                 {
-                    return SchemaOpMessage_Stage::
-                        SchemaOpMessage_Stage_CleanSchema;
+                    continue;
+                }
+                std::string split_range_op_str;
+                // Add table name firstly
+                std::string table_name =
+                    split_range_op.split_range_op_message_.table_name();
+                uint8_t tabname_len = table_name.length();
+                const char *ptr = reinterpret_cast<const char *>(&tabname_len);
+                split_range_op_str.append(ptr, sizeof(uint8_t));
+                split_range_op_str.append(table_name.data(), tabname_len);
+                // then, add split range op
+                split_range_op.split_range_op_message_.AppendToString(
+                    &split_range_op_str);
+
+                res.emplace_back(
+                    std::make_shared<Item>(txn,
+                                           split_range_op.commit_ts_,
+                                           std::move(split_range_op_str),
+                                           LogItemType::SplitRangeLog));
+            }
+        }
+
+        /**
+         * The multi-stage logs at clean stage will be erased when all
+         * node group's ckpt_ts are one hour greater than its commit ts.
+         */
+        void TryCleanMultiStageOps()
+        {
+            uint64_t ckpt_ts =
+                cc_ng_info_.last_ckpt_ts_.load(std::memory_order_relaxed);
+            using namespace std::chrono_literals;
+            uint64_t one_hour = std::chrono::microseconds(1h).count();
+            for (auto it = tx_catalog_ops_.begin();
+                 it != tx_catalog_ops_.end();)
+            {
+                const CatalogOp &op = it->second;
+                auto stage = op.SchemasOpStage();
+                if (stage == SchemaOpMessage_Stage::
+                                 SchemaOpMessage_Stage_CleanSchema &&
+                    ckpt_ts > op.CommitTs() + one_hour)
+                {
+                    LOG(INFO)
+                        << "erasing schema op at clean stage after one hour, "
+                           "commit_ts: "
+                        << op.CommitTs() << ", ckpt ts: " << ckpt_ts;
+
+                    uint64_t txn_to_delete = it->first;
+                    uint64_t commit_ts_to_delete = op.commit_ts_;
+                    it = tx_catalog_ops_.erase(it);
+
+                    int rc = DeleteSchemaOp(txn_to_delete, commit_ts_to_delete);
+                    while (rc != 0)
+                    {
+                        rc = DeleteSchemaOp(txn_to_delete, commit_ts_to_delete);
+                    }
                 }
                 else
                 {
-                    return SchemaOpMessage_Stage::
-                        SchemaOpMessage_Stage_CommitSchema;
+                    it++;
+                }
+            }
+            for (auto it = tx_split_range_ops_.begin();
+                 it != tx_split_range_ops_.end();)
+            {
+                const SplitRangeOp &op = it->second;
+                auto stage = op.split_range_op_message_.stage();
+                if (stage == SplitRangeOpMessage_Stage::
+                                 SplitRangeOpMessage_Stage_CleanSplit &&
+                    ckpt_ts > op.commit_ts_ + one_hour)
+                {
+                    LOG(INFO)
+                        << "erasing range split op at clean stage after one "
+                           "hour, commit_ts: "
+                        << op.commit_ts_ << ", ckpt ts: " << ckpt_ts;
+
+                    uint64_t txn_to_delete = it->first;
+                    uint64_t commit_ts_to_delete = op.commit_ts_;
+                    it = tx_split_range_ops_.erase(it);
+
+                    int rc = DeleteRangeOp(txn_to_delete, commit_ts_to_delete);
+                    while (rc != 0)
+                    {
+                        rc = DeleteRangeOp(txn_to_delete, commit_ts_to_delete);
+                    }
+                }
+                else
+                {
+                    it++;
                 }
             }
         }
 
-        SchemaOpMessage *MutableSchemaOpMsg()
-        {
-            return schemas_op_msg_.data();
-        }
+        virtual int PersistSchemaOp(uint64_t txn,
+                                    uint64_t timestamp,
+                                    const SchemaOpMessage &schema_op) = 0;
 
-        const SchemaOpMessage *SchemaOpMsg() const
-        {
-            return schemas_op_msg_.data();
-        }
+        virtual int DeleteSchemaOp(uint64_t txn, uint64_t timestamp) = 0;
 
-        void ClearAll()
+        virtual int PersistRangeOp(uint64_t txn,
+                                   uint64_t timestamp,
+                                   const SplitRangeOpMessage &range_op) = 0;
+
+        virtual int DeleteRangeOp(uint64_t txn, uint64_t timestamp) = 0;
+
+        virtual int PersistCkptAndMaxTxn(uint64_t ckpt_ts,
+                                         uint32_t max_txn) = 0;
+
+        CcNgInfo cc_ng_info_;
+
+        struct CatalogOp
         {
-            for (SchemaOpMessage &schema_op_msg : schemas_op_msg_)
+            CatalogOp(const SchemaOpMessage &schema_op, uint64_t commit_ts)
+                : schema_op_msg_({schema_op}), commit_ts_(commit_ts)
             {
+            }
+
+            CatalogOp(SchemaOpMessage &&schema_op, uint64_t commit_ts)
+                : schema_op_msg_({std::move(schema_op)}), commit_ts_(commit_ts)
+            {
+            }
+
+            CatalogOp(
+                const ::google::protobuf::RepeatedPtrField<SchemaOpMessage>
+                    &schemas_op,
+                uint64_t commit_ts)
+                : schemas_op_msg_(schemas_op.begin(), schemas_op.end()),
+                  commit_ts_(commit_ts)
+            {
+            }
+
+            CatalogOp(std::vector<SchemaOpMessage> schemas_op,
+                      uint64_t commit_ts)
+                : schemas_op_msg_(std::move(schemas_op)), commit_ts_(commit_ts)
+            {
+            }
+            uint64_t CommitTs() const
+            {
+                return commit_ts_;
+            }
+
+            void SetCommitTs(uint64_t commit_ts)
+            {
+                commit_ts_ = commit_ts;
+            }
+
+            // If contains only one SchemaOpMessage, return its stage.
+            // If contains multiple SchemaOpMessage, return clean only when all
+            // clean and return commit otherwise.
+            SchemaOpMessage_Stage SchemasOpStage() const
+            {
+                if (schemas_op_msg_.size() == 1)
+                {
+                    return schemas_op_msg_.front().stage();
+                }
+                else
+                {
+                    bool all_cleaned = std::all_of(
+                        schemas_op_msg_.begin(),
+                        schemas_op_msg_.end(),
+                        [](const SchemaOpMessage &schema_op_msg)
+                        {
+                            return schema_op_msg.stage() ==
+                                   SchemaOpMessage_Stage_CleanSchema;
+                        });
+                    if (all_cleaned)
+                    {
+                        return SchemaOpMessage_Stage::
+                            SchemaOpMessage_Stage_CleanSchema;
+                    }
+
+                    bool all_committed = std::all_of(
+                        schemas_op_msg_.begin(),
+                        schemas_op_msg_.end(),
+                        [](const SchemaOpMessage &schema_op_msg)
+                        {
+                            return schema_op_msg.stage() ==
+                                   SchemaOpMessage_Stage_CommitSchema;
+                        });
+                    if (all_committed)
+                    {
+                        return SchemaOpMessage_Stage::
+                            SchemaOpMessage_Stage_CommitSchema;
+                    }
+                    else
+                    {
+                        return SchemaOpMessage_Stage::
+                            SchemaOpMessage_Stage_PrepareSchema;
+                    }
+                }
+            }
+
+            SchemaOpMessage *MutableSchemaOpMsg()
+            {
+                return schemas_op_msg_.data();
+            }
+
+            const SchemaOpMessage *SchemaOpMsg() const
+            {
+                return schemas_op_msg_.data();
+            }
+
+            void CommitAll()
+            {
+                for (SchemaOpMessage &schema_op_msg : schemas_op_msg_)
+                {
+                    schema_op_msg.set_stage(SchemaOpMessage_Stage_CommitSchema);
+                }
+            }
+
+            void ClearAll()
+            {
+                for (SchemaOpMessage &schema_op_msg : schemas_op_msg_)
+                {
+                    schema_op_msg.Clear();
+                    schema_op_msg.set_stage(SchemaOpMessage_Stage_CleanSchema);
+                }
+            }
+
+            void Clear(const std::string &table_name, CcTableType table_type)
+            {
+                auto it = std::find_if(
+                    schemas_op_msg_.begin(),
+                    schemas_op_msg_.end(),
+                    [&table_name,
+                     table_type](const SchemaOpMessage &schema_op_msg)
+                    {
+                        return schema_op_msg.table_name_str() == table_name &&
+                               schema_op_msg.table_type() == table_type;
+                    });
+                assert(it != schemas_op_msg_.end());
+                SchemaOpMessage &schema_op_msg = *it;
                 schema_op_msg.Clear();
                 schema_op_msg.set_stage(SchemaOpMessage_Stage_CleanSchema);
             }
-        }
 
-        void Clear(const std::string &table_name, CcTableType table_type)
+            size_t SchemaOpMsgCount() const
+            {
+                return schemas_op_msg_.size();
+            }
+
+        private:
+            // DML-trigger-DDL allows update to multiple catalogs.
+            // pure-DDL allows update to only one catalog.
+            std::vector<SchemaOpMessage> schemas_op_msg_;
+            uint64_t commit_ts_;
+        };
+
+        /**
+         * @brief A collection ongoing tx's and their ongoing schema operations.
+         *
+         */
+        std::unordered_map<uint64_t, CatalogOp> tx_catalog_ops_;
+        std::unordered_map<uint64_t, CatalogOp> snapshot_tx_catalog_ops_;
+
+        /**
+         * protects concurrent access to log state, more specifically, CcNode
+         * group term and last_ckpt_ts and tx_catalog_ops_. RecoverTx reads them
+         * and state machine on_apply modifies them. Since RecoverTx is
+         * processed in separate RPC thread, they are concurrent.
+         */
+        mutable std::shared_mutex log_state_mutex_;
+
+        struct SplitRangeOp
         {
-            auto it = std::find_if(
-                schemas_op_msg_.begin(),
-                schemas_op_msg_.end(),
-                [&table_name, table_type](const SchemaOpMessage &schema_op_msg)
-                {
-                    return schema_op_msg.table_name_str() == table_name &&
-                           schema_op_msg.table_type() == table_type;
-                });
-            assert(it != schemas_op_msg_.end());
-            SchemaOpMessage &schema_op_msg = *it;
-            schema_op_msg.Clear();
-            schema_op_msg.set_stage(SchemaOpMessage_Stage_CleanSchema);
-        }
+            SplitRangeOp(const SplitRangeOpMessage &split_range_op_message,
+                         uint64_t commit_ts)
+                : split_range_op_message_(split_range_op_message),
+                  commit_ts_(commit_ts)
+            {
+            }
 
-        size_t SchemaOpMsgCount() const
+            SplitRangeOp(SplitRangeOpMessage &split_range_op_message,
+                         uint64_t commit_ts)
+                : split_range_op_message_(split_range_op_message),
+                  commit_ts_(commit_ts)
+            {
+            }
+
+            SplitRangeOpMessage split_range_op_message_;
+            uint64_t commit_ts_;
+        };
+
+        /**
+         * @brief A collection ongoint tx's and their ongoing split range
+         * operations.
+         *
+         */
+        std::unordered_map<uint64_t, SplitRangeOp> tx_split_range_ops_;
+        std::unordered_map<uint64_t, SplitRangeOp> snapshot_tx_split_range_ops_;
+
+        struct ClusterScaleOp
         {
-            return schemas_op_msg_.size();
-        }
+            ClusterScaleOp(
+                const ClusterScaleOpMessage &cluster_scale_op_message,
+                uint64_t commit_ts)
+                : cluster_scale_op_message_(cluster_scale_op_message),
+                  commit_ts_(commit_ts)
+            {
+            }
 
-    private:
-        // 1-PC allows update to multiple catalogs.
-        // 2-PC allows update to only one catalog.
-        std::vector<SchemaOpMessage> schemas_op_msg_;
-        uint64_t commit_ts_;
+            ClusterScaleOp(ClusterScaleOpMessage &cluster_scale_op_message,
+                           uint64_t commit_ts)
+                : cluster_scale_op_message_(cluster_scale_op_message),
+                  commit_ts_(commit_ts)
+            {
+            }
+
+            ClusterScaleOpMessage cluster_scale_op_message_;
+            uint64_t commit_ts_;
+        };
     };
-
-    /**
-     * @brief A collection ongoing tx's and their ongoing schema operations.
-     *
-     */
-    std::unordered_map<uint64_t, CatalogOp> tx_catalog_ops_;
-    std::unordered_map<uint64_t, CatalogOp> snapshot_tx_catalog_ops_;
-
-    /**
-     * protects concurrent access to log state, more specifically, CcNode
-     * group term and last_ckpt_ts and tx_catalog_ops_. RecoverTx reads them
-     * and state machine on_apply modifies them. Since RecoverTx is
-     * processed in separate RPC thread, they are concurrent.
-     */
-    mutable std::shared_mutex log_state_mutex_;
-
-    struct SplitRangeOp
-    {
-        SplitRangeOp(const SplitRangeOpMessage &split_range_op_message,
-                     uint64_t commit_ts)
-            : split_range_op_message_(split_range_op_message),
-              commit_ts_(commit_ts)
-        {
-        }
-
-        SplitRangeOp(SplitRangeOpMessage &split_range_op_message,
-                     uint64_t commit_ts)
-            : split_range_op_message_(split_range_op_message),
-              commit_ts_(commit_ts)
-        {
-        }
-
-        SplitRangeOpMessage split_range_op_message_;
-        uint64_t commit_ts_;
-    };
-
-    /**
-     * @brief A collection ongoint tx's and their ongoing split range
-     * operations.
-     *
-     */
-    std::unordered_map<uint64_t, SplitRangeOp> tx_split_range_ops_;
-    std::unordered_map<uint64_t, SplitRangeOp> snapshot_tx_split_range_ops_;
-
-    struct ClusterScaleOp
-    {
-        ClusterScaleOp(const ClusterScaleOpMessage &cluster_scale_op_message,
-                       uint64_t commit_ts)
-            : cluster_scale_op_message_(cluster_scale_op_message),
-              commit_ts_(commit_ts)
-        {
-        }
-
-        ClusterScaleOp(ClusterScaleOpMessage &cluster_scale_op_message,
-                       uint64_t commit_ts)
-            : cluster_scale_op_message_(cluster_scale_op_message),
-              commit_ts_(commit_ts)
-        {
-        }
-
-        ClusterScaleOpMessage cluster_scale_op_message_;
-        uint64_t commit_ts_;
-    };
-};
 }  // namespace txlog
