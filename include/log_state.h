@@ -207,7 +207,7 @@ public:
         {
             return {false, SchemaOpMessage_Stage_Stage_MIN};
         }
-        return {true, catalog_it->second.schema_op_msg_.stage()};
+        return {true, catalog_it->second.SchemasOpStage()};
     }
 
     virtual int Start()
@@ -215,7 +215,7 @@ public:
         return 0;
     }
 
-    void UpdateSchemaOp(uint64_t tx_no,
+    void UpsertSchemaOp(uint64_t tx_no,
                         uint64_t commit_ts,
                         const SchemaOpMessage &schema_op)
     {
@@ -226,6 +226,8 @@ public:
         }
 
         std::unique_lock lk(log_state_mutex_);
+        assert(!schema_op.table_name_str().empty() &&
+               schema_op.table_type() == CcTableType::Primary);
 
         SchemaOpMessage::Stage new_stage = schema_op.stage();
         // only insert new entry at prepare stage
@@ -250,8 +252,8 @@ public:
             }
 
             // The schema operation has been logged. Only updates the stage.
-            SchemaOpMessage &schema_op_msg = catalog_it->second.schema_op_msg_;
-            if (new_stage > schema_op_msg.stage())
+            CatalogOp &catalog_op = catalog_it->second;
+            if (new_stage > catalog_op.SchemasOpStage())
             {
                 // For the schema operation that need to deal with the data,
                 // such as ADD INDEX.
@@ -271,7 +273,7 @@ public:
                     new_stage == SchemaOpMessage_Stage::
                                      SchemaOpMessage_Stage_CommitSchema)
                 {
-                    catalog_it->second.commit_ts_ = 0;
+                    catalog_op.SetCommitTs(0);
                 }
 
                 // Schema logs at CleanSchema stage will be kept in LogState
@@ -283,16 +285,27 @@ public:
                 if (new_stage ==
                     SchemaOpMessage_Stage::SchemaOpMessage_Stage_CleanSchema)
                 {
-                    schema_op_msg.Clear();
+                    // For 2-PC DDL transactions, CatalogOp contains only
+                    // one catalog image. For logical alter table DDL inside
+                    // DML transactions, CatalogOp might contain multiple
+                    // catalog images. Given one catalog, recovery for the
+                    // above two scene share same DDL recovery workflow.
+                    // Clear the specified SchemaOpMsg.
+                    catalog_op.Clear(schema_op.table_name_str(),
+                                     schema_op.table_type());
                 }
-
-                schema_op_msg.set_stage(new_stage);
+                else
+                {
+                    catalog_op.MutableSchemaOpMsg()->set_stage(new_stage);
+                }
             }
-            else if (new_stage == schema_op_msg.stage())
+            else if (new_stage == catalog_op.SchemasOpStage())
             {
                 if (new_stage ==
                     SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData)
                 {
+                    SchemaOpMessage &schema_op_msg =
+                        *catalog_op.MutableSchemaOpMsg();
                     schema_op_msg.set_last_key_type(schema_op.last_key_type());
                     schema_op_msg.set_last_key_value(
                         schema_op.last_key_value());
@@ -303,6 +316,40 @@ public:
             else
             {
                 return;
+            }
+        }
+    }
+
+    void UpsertSchemaOpWithinDML(
+        uint64_t tx_no,
+        uint64_t commit_ts,
+        const ::google::protobuf::RepeatedPtrField<SchemaOpMessage> &schemas_op)
+    {
+        // this func is called when on_apply processing WriteLogRequest, might
+        // be concurrent with SearchTxSchemaLog() in RecoverTx rpc thread
+        std::unique_lock lk(log_state_mutex_);
+
+        SchemaOpMessage::Stage stage = schemas_op.at(0).stage();
+        if (stage == SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema)
+        {
+            auto [it, success] =
+                tx_catalog_ops_.try_emplace(tx_no, schemas_op, commit_ts);
+            if (!success)
+            {
+                LOG(INFO) << "duplicate commit log detected, txn: " << tx_no
+                          << ", ignore";
+            }
+        }
+        else
+        {
+            assert(stage == SchemaOpMessage_Stage_CleanSchema);
+            auto it = tx_catalog_ops_.find(tx_no);
+            if (it != tx_catalog_ops_.end())
+            {
+                CatalogOp &catalog_op = it->second;
+                assert(schemas_op.at(0).table_name_str() ==
+                       catalog_op.MutableSchemaOpMsg()->table_name_str());
+                catalog_op.ClearAll();
             }
         }
     }
@@ -487,18 +534,21 @@ protected:
     {
         for (const auto &[txn, catalog_op] : tx_catalog_ops_)
         {
-            if (catalog_op.schema_op_msg_.stage() ==
-                SchemaOpMessage_Stage::SchemaOpMessage_Stage_CleanSchema)
+            for (uint16_t idx = 0; idx < catalog_op.SchemaOpMsgCount(); ++idx)
             {
-                continue;
+                const SchemaOpMessage &msg = catalog_op.SchemaOpMsg()[idx];
+                if (msg.stage() !=
+                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_CleanSchema)
+                {
+                    std::string schema_op_str;
+                    msg.SerializeToString(&schema_op_str);
+                    res.emplace_back(
+                        std::make_shared<Item>(txn,
+                                               catalog_op.CommitTs(),
+                                               std::move(schema_op_str),
+                                               LogItemType::SchemaLog));
+                }
             }
-            std::string schema_op_str;
-            catalog_op.schema_op_msg_.SerializeToString(&schema_op_str);
-
-            res.emplace_back(std::make_shared<Item>(txn,
-                                                    catalog_op.commit_ts_,
-                                                    std::move(schema_op_str),
-                                                    LogItemType::SchemaLog));
         }
     }
 
@@ -544,14 +594,14 @@ protected:
         for (auto it = tx_catalog_ops_.begin(); it != tx_catalog_ops_.end();)
         {
             const CatalogOp &op = it->second;
-            auto stage = op.schema_op_msg_.stage();
+            auto stage = op.SchemasOpStage();
             if (stage ==
                     SchemaOpMessage_Stage::SchemaOpMessage_Stage_CleanSchema &&
-                ckpt_ts > op.commit_ts_ + one_hour)
+                ckpt_ts > op.CommitTs() + one_hour)
             {
                 LOG(INFO) << "erasing schema op at clean stage after one hour, "
                              "commit_ts: "
-                          << op.commit_ts_ << ", ckpt ts: " << ckpt_ts;
+                          << op.CommitTs() << ", ckpt ts: " << ckpt_ts;
 
                 uint64_t txn_to_delete = it->first;
                 uint64_t commit_ts_to_delete = op.commit_ts_;
@@ -617,16 +667,114 @@ protected:
     struct CatalogOp
     {
         CatalogOp(const SchemaOpMessage &schema_op, uint64_t commit_ts)
-            : schema_op_msg_(schema_op), commit_ts_(commit_ts)
+            : schema_op_msg_({schema_op}), commit_ts_(commit_ts)
         {
         }
 
         CatalogOp(SchemaOpMessage &&schema_op, uint64_t commit_ts)
-            : schema_op_msg_(schema_op), commit_ts_(commit_ts)
+            : schema_op_msg_({std::move(schema_op)}), commit_ts_(commit_ts)
         {
         }
 
-        SchemaOpMessage schema_op_msg_;
+        CatalogOp(const ::google::protobuf::RepeatedPtrField<SchemaOpMessage>
+                      &schemas_op,
+                  uint64_t commit_ts)
+            : schemas_op_msg_(schemas_op.begin(), schemas_op.end()),
+              commit_ts_(commit_ts)
+        {
+        }
+
+        CatalogOp(std::vector<SchemaOpMessage> schemas_op, uint64_t commit_ts)
+            : schemas_op_msg_(std::move(schemas_op)), commit_ts_(commit_ts)
+        {
+        }
+        uint64_t CommitTs() const
+        {
+            return commit_ts_;
+        }
+
+        void SetCommitTs(uint64_t commit_ts)
+        {
+            commit_ts_ = commit_ts;
+        }
+
+        // If contains only one SchemaOpMessage, return its stage.
+        // If contains multiple SchemaOpMessage, return clean only when all
+        // clean and return commit otherwise.
+        SchemaOpMessage_Stage SchemasOpStage() const
+        {
+            if (schemas_op_msg_.size() == 1)
+            {
+                return schemas_op_msg_.front().stage();
+            }
+            else
+            {
+                // 1-PC stage is either commit or clean.
+                bool all_cleaned =
+                    std::all_of(schemas_op_msg_.begin(),
+                                schemas_op_msg_.end(),
+                                [](const SchemaOpMessage &schema_op_msg)
+                                {
+                                    return schema_op_msg.stage() ==
+                                           SchemaOpMessage_Stage_CleanSchema;
+                                });
+                if (all_cleaned)
+                {
+                    return SchemaOpMessage_Stage::
+                        SchemaOpMessage_Stage_CleanSchema;
+                }
+                else
+                {
+                    return SchemaOpMessage_Stage::
+                        SchemaOpMessage_Stage_CommitSchema;
+                }
+            }
+        }
+
+        SchemaOpMessage *MutableSchemaOpMsg()
+        {
+            return schemas_op_msg_.data();
+        }
+
+        const SchemaOpMessage *SchemaOpMsg() const
+        {
+            return schemas_op_msg_.data();
+        }
+
+        void ClearAll()
+        {
+            for (SchemaOpMessage &schema_op_msg : schemas_op_msg_)
+            {
+                schema_op_msg.Clear();
+                schema_op_msg.set_stage(SchemaOpMessage_Stage_CleanSchema);
+            }
+        }
+
+        void Clear(const std::string &table_name, CcTableType table_type)
+        {
+            auto it = std::find_if(
+                schemas_op_msg_.begin(),
+                schemas_op_msg_.end(),
+                [&table_name, table_type](const SchemaOpMessage &schema_op_msg)
+                {
+                    return schema_op_msg.table_name_str() == table_name &&
+                           schema_op_msg.table_type() == table_type;
+                });
+            assert(it != schemas_op_msg_.end());
+            SchemaOpMessage &schema_op_msg = *it;
+            schema_op_msg.Clear();
+            schema_op_msg.set_stage(SchemaOpMessage_Stage_CleanSchema);
+        }
+
+        size_t SchemaOpMsgCount() const
+        {
+            return schemas_op_msg_.size();
+        }
+
+    private:
+        // 1-PC allows update to multiple catalogs.
+        // 2-PC allows update to only one catalog.
+        std::vector<SchemaOpMessage> schemas_op_msg_;
         uint64_t commit_ts_;
     };
 

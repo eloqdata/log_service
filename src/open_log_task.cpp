@@ -228,6 +228,12 @@ void OpenLogTaskWorker::HandleWriteLog(const WriteLogRequest &req,
     {
         const DataLogMessage &data_log = log_content.data_log();
 
+        if (!data_log.schema_logs().empty())
+        {
+            log_state_->UpsertSchemaOpWithinDML(
+                req.txn_number(), timestamp, data_log.schema_logs());
+        }
+
         // Process individual data log entries - batching is now done at
         // WorkerThreadMain level
         for (auto it = data_log.node_txn_logs().begin();
@@ -243,7 +249,7 @@ void OpenLogTaskWorker::HandleWriteLog(const WriteLogRequest &req,
     case LogContentMessage::ContentCase::kSchemaLog:
     {
         const SchemaOpMessage &schema_log = log_content.schema_log();
-        log_state_->UpdateSchemaOp(txn, timestamp, schema_log);
+        log_state_->UpsertSchemaOp(txn, timestamp, schema_log);
         break;
     }
     case LogContentMessage::ContentCase::kSplitRangeLog:
