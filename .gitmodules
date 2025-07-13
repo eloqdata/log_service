@@ -1,3 +1,3 @@
 [submodule "tx-log-protos"]
 	path = tx-log-protos
-	url = git@github.com:eloqdata/tx-log-protos.git
+	url = https://github.com/eloqdata/tx-log-protos.git
