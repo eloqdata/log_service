@@ -47,7 +47,7 @@ LogStateRocksDBImpl::LogStateRocksDBImpl(std::string rocksdb_path,
       rocksdb_storage_path_(std::move(rocksdb_path)),
       sst_files_size_limit_(sst_files_size_limit),
       rocksdb_scan_threads_(rocksdb_scan_threads),
-      last_purging_sst_ckpt_ts_(0) {};
+      last_purging_sst_ckpt_ts_(0){};
 
 LogStateRocksDBImpl::~LogStateRocksDBImpl()
 {
@@ -346,8 +346,8 @@ int LogStateRocksDBImpl::Start()
 
             uint64_t timestamp;
             uint64_t tx_number;
-            SchemaOpMessage_Stage new_schema_stage;
-            SchemaOpMessage new_schema_op_msg;
+            ::google::protobuf::RepeatedPtrField<SchemaOpMessage>
+                new_schemas_op_msg;
             SplitRangeOpMessage_Stage new_range_stage;
             SplitRangeOpMessage new_range_op_msg;
 
@@ -382,11 +382,10 @@ int LogStateRocksDBImpl::Start()
                                 value_slice,
                                 timestamp,
                                 tx_number,
-                                new_schema_op_msg);
-                    new_schema_stage = new_schema_op_msg.stage();
+                                new_schemas_op_msg);
 
                     auto [it, success] = tx_catalog_ops_.try_emplace(
-                        tx_number, new_schema_op_msg, timestamp);
+                        tx_number, new_schemas_op_msg, timestamp);
 
                     if (!success)
                     {
@@ -395,15 +394,21 @@ int LogStateRocksDBImpl::Start()
 
                         // The schema operation has been logged. Only
                         // updates the stage.
+                        assert(catalog_it->second.SchemaOpMsgCount() ==
+                               new_schemas_op_msg.size());
+
                         for (uint16_t idx = 0;
                              idx < catalog_it->second.SchemaOpMsgCount();
                              ++idx)
                         {
                             SchemaOpMessage &msg =
-                                catalog_it->second.MutableSchemaOpMsg()[idx];
-                            if (new_schema_stage > msg.stage())
+                                catalog_it->second.SchemaOpMsgs()[idx];
+                            SchemaOpMessage &new_msg =
+                                new_schemas_op_msg.at(idx);
+                            if (new_schemas_op_msg.at(idx).stage() >
+                                msg.stage())
                             {
-                                msg.set_stage(new_schema_stage);
+                                msg.set_stage(new_msg.stage());
                             }
                         }
                     }
@@ -751,34 +756,81 @@ int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
                                          uint64_t timestamp,
                                          const SchemaOpMessage &schema_op_msg)
 {
-    std::string schema_op_str;
-    SchemaOpMessage::Stage new_stage = schema_op_msg.stage();
-    if (new_stage > SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareSchema)
-    {
-        auto catalog_it = tx_catalog_ops_.find(txn);
-        assert(catalog_it != tx_catalog_ops_.end());
+    std::array<char, 17> key{};
+    std::string schemas_op_str;
+    rocksdb::ReadOptions read_options;
+    rocksdb::Status rc;
 
-        for (uint16_t idx = 0; idx < catalog_it->second.SchemaOpMsgCount(); ++idx)
-        {
-            SchemaOpMessage &msg = catalog_it->second.MutableSchemaOpMsg()[idx];
-            msg.set_stage(new_stage);
-            // only overwrite satge
-            schema_op_str = msg.SerializeAsString();
-        }
+    Serialize(key, timestamp, txn, (uint8_t) LogState::MetaOp::SchemaOp);
+    rc = db_->Get(read_options,
+                  meta_handle_,
+                  rocksdb::Slice(key.data(), key.size()),
+                  &schemas_op_str);
+    if (!rc.ok() && !rc.IsNotFound())
+    {
+        return rc.code();
+    }
+
+    if (rc.IsNotFound())
+    {
+        schema_op_msg.SerializeToString(&schemas_op_str);
     }
     else
     {
-        schema_op_str = schema_op_msg.SerializeAsString();
+        SchemaOpMessage schema_op_msg_stored;
+
+        char *ptr = schemas_op_str.data();
+        uint16_t schema_cnt = *reinterpret_cast<uint16_t *>(ptr);
+        ptr += sizeof(schema_cnt);
+        for (uint16_t idx = 0; idx < schema_cnt; ++idx)
+        {
+            uint32_t schema_len = *reinterpret_cast<uint32_t *>(ptr);
+            ptr += sizeof(schema_len);
+            schema_op_msg_stored.ParseFromArray(ptr, schema_len);
+
+            if (schema_op_msg_stored.table_name_str() ==
+                    schema_op_msg.table_name_str() &&
+                schema_op_msg_stored.table_type() == schema_op_msg.table_type())
+            {
+                if (schema_op_msg_stored.stage() < schema_op_msg.stage())
+                {
+                    schema_op_msg.SerializeToArray(ptr, schema_len);
+                }
+            }
+        }
     }
 
+    rc = db_->Put(
+        write_option_, rocksdb::Slice(key.data(), key.size()), schemas_op_str);
+    return rc.ok() ? 0 : rc.code();
+}
+
+int LogStateRocksDBImpl::PersistSchemasOp(
+    uint64_t txn,
+    uint64_t timestamp,
+    const ::google::protobuf::RepeatedPtrField<SchemaOpMessage> &schemas_op)
+{
     std::array<char, 17> key{};
     Serialize(key, timestamp, txn, (uint8_t) LogState::MetaOp::SchemaOp);
 
-    rocksdb::Status rc = db_->Put(write_option_,
-                                  meta_handle_,
-                                  rocksdb::Slice(key.data(), key.size()),
-                                  schema_op_str);
+    std::string schemas_op_str;
 
+    uint16_t cnt = schemas_op.size();
+    schemas_op_str.append(reinterpret_cast<char *>(&cnt), sizeof(cnt));
+
+    for (const SchemaOpMessage &msg : schemas_op)
+    {
+        std::string str = msg.SerializeAsString();
+        uint32_t len = str.size();
+        schemas_op_str.append(reinterpret_cast<char *>(&len), sizeof(len));
+        schemas_op_str += str;
+    }
+
+    rocksdb::Status rc =
+        db_->Put(write_option_,
+                 meta_handle_,
+                 rocksdb::Slice(key.data(), key.size()),
+                 rocksdb::Slice(schemas_op_str.data(), schemas_op_str.size()));
     return rc.ok() ? 0 : rc.code();
 }
 
