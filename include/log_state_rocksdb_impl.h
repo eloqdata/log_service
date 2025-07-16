@@ -102,11 +102,12 @@ inline void Deserialize(rocksdb::Slice key,
     tx_number = __builtin_bswap64(tx_no_be);
 }
 
-inline void Deserialize(rocksdb::Slice key,
-                        rocksdb::Slice value,
-                        uint64_t &timestamp,
-                        uint64_t &tx_number,
-                        SchemaOpMessage &schema_op)
+inline void Deserialize(
+    rocksdb::Slice key,
+    rocksdb::Slice value,
+    uint64_t &timestamp,
+    uint64_t &tx_number,
+    ::google::protobuf::RepeatedPtrField<SchemaOpMessage> &schemas_op)
 {
     assert(key.size() == 17);
     const char *p = key.data();
@@ -120,7 +121,17 @@ inline void Deserialize(rocksdb::Slice key,
     timestamp = __builtin_bswap64(ts_be);
     p += sizeof(uint64_t);
 
-    schema_op.ParseFromString(value.ToString());
+    const char *ptr = value.data();
+    uint16_t cnt = *reinterpret_cast<const uint16_t *>(ptr);
+    ptr += sizeof(cnt);
+    for (uint16_t idx = 0; idx < cnt; ++idx)
+    {
+        uint32_t len = *reinterpret_cast<const uint32_t *>(ptr);
+        ptr += sizeof(len);
+        SchemaOpMessage *schema_op_msg = schemas_op.Add();
+        schema_op_msg->ParseFromArray(ptr, len);
+        ptr += len;
+    }
 }
 
 inline void Deserialize(rocksdb::Slice key,
@@ -395,6 +406,12 @@ private:
     int PersistSchemaOp(uint64_t txn,
                         uint64_t timestamp,
                         const SchemaOpMessage &schema_op) override;
+
+    int PersistSchemasOp(
+        uint64_t txn,
+        uint64_t timestamp,
+        const ::google::protobuf::RepeatedPtrField<SchemaOpMessage> &schemas_op)
+        override;
 
     int DeleteSchemaOp(uint64_t txn, uint64_t timestamp) override;
 
