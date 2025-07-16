@@ -47,7 +47,7 @@ LogStateRocksDBImpl::LogStateRocksDBImpl(std::string rocksdb_path,
       rocksdb_storage_path_(std::move(rocksdb_path)),
       sst_files_size_limit_(sst_files_size_limit),
       rocksdb_scan_threads_(rocksdb_scan_threads),
-      last_purging_sst_ckpt_ts_(0){};
+      last_purging_sst_ckpt_ts_(0) {};
 
 LogStateRocksDBImpl::~LogStateRocksDBImpl()
 {
@@ -266,6 +266,7 @@ int LogStateRocksDBImpl::Start()
                      << status.ToString();
     }
 
+    bool new_db = false;
     if (column_families.size() <= 1)
     {
         LOG(INFO) << "No existing column families found. Creating "
@@ -282,6 +283,7 @@ int LogStateRocksDBImpl::Start()
 
         default_handle_ = cfhs[0];
         meta_handle_ = cfhs[1];
+        new_db = true;
     }
     else if (column_families.size() != 2)
     {
@@ -307,6 +309,7 @@ int LogStateRocksDBImpl::Start()
     }
 
     // Recover meta data from RocksDB to log_state
+    if (!new_db)
     {
         rocksdb::ReadOptions read_options;
 
@@ -319,7 +322,23 @@ int LogStateRocksDBImpl::Start()
                                       meta_handle_,
                                       rocksdb::Slice(key.data(), key.size()),
                                       &value);
-        cc_ng_info_.last_ckpt_ts_ = *((uint64_t *) value.data());
+        if (rc.ok())
+        {
+            cc_ng_info_.last_ckpt_ts_ = *((uint64_t *) value.data());
+        }
+        else if (rc.IsNotFound())
+        {
+            cc_ng_info_.last_ckpt_ts_ = 0;
+        }
+        else
+        {
+            LOG(ERROR) << "Failed to get last checkpoint timestamp from "
+                          "rocksdb, rocksdb storage path: "
+                       << rocksdb_storage_path_
+                       << ", error message: " << rc.ToString();
+            assert(false);
+            return -1;
+        }
 
         // latest_txn_no
         Serialize(
@@ -328,7 +347,24 @@ int LogStateRocksDBImpl::Start()
                       meta_handle_,
                       rocksdb::Slice(key.data(), key.size()),
                       &value);
-        cc_ng_info_.latest_txn_no_ = *((uint32_t *) value.data());
+
+        if (rc.ok())
+        {
+            cc_ng_info_.latest_txn_no_ = *((uint32_t *) value.data());
+        }
+        else if (rc.IsNotFound())
+        {
+            cc_ng_info_.latest_txn_no_ = 0;
+        }
+        else
+        {
+            LOG(ERROR)
+                << "Failed to get last txn from rocksdb, rocksdb storage path: "
+                << rocksdb_storage_path_
+                << ", error message: " << rc.ToString();
+            assert(false);
+            return -1;
+        }
 
         // tx_catalog_ops and tx_split_range_ops_
         {
