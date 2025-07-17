@@ -53,6 +53,8 @@ class LogShippingAgent
 {
 public:
     LogShippingAgent(uint32_t log_group_id,
+                     uint32_t cc_ng_id,
+                     int64_t cc_ng_term,
                      const std::string &ip,
                      uint16_t port,
                      std::unique_ptr<ItemIterator> &&iterator,
@@ -60,6 +62,8 @@ public:
                      uint64_t last_ckpt_ts,
                      bool start_with_replay)
         : log_group_id_(log_group_id),
+          cc_node_group_id_(cc_ng_id),
+          cc_node_group_term_(cc_ng_term),
           full_ip_(ip + ":" + std::to_string(port)),
           iterator_(std::move(iterator)),
           latest_txn_no_(latest_txn_no),
@@ -131,8 +135,9 @@ public:
                         // leader that all uncheckpointed records have been
                         // sent.
                         ReplayMessage replay_msg;
-                        replay_msg.set_cc_node_group_id(DEFAULT_CC_NG_ID);
-                        replay_msg.set_cc_node_group_term(DEFAULT_CC_NG_TERM);
+                        replay_msg.set_cc_node_group_id(cc_node_group_id_);
+                        replay_msg.set_cc_node_group_term(cc_node_group_term_);
+
                         ReplayFinishMsg *finish_msg =
                             replay_msg.mutable_finish();
                         finish_msg->set_log_group_id(log_group_id_);
@@ -198,7 +203,8 @@ public:
         }
 
         to_send_cv_.notify_all();
-        thd_.detach();
+        // thd_.detach();
+        thd_.join();
     }
 
     void AddLogRecord(Item::Pointer log_rec)
@@ -235,11 +241,15 @@ private:
             return err;
         }
 
+        LOG(INFO) << "Connected stream to " << full_ip_;
+
         LogReplayConnectRequest req;
         LogReplayConnectResponse resp;
         req.set_log_group_id(log_group_id_);
-        req.set_cc_node_group_id(DEFAULT_CC_NG_ID);
-        req.set_cc_ng_term(DEFAULT_CC_NG_TERM);
+        // req.set_cc_node_group_id(DEFAULT_CC_NG_ID);
+        // req.set_cc_ng_term(DEFAULT_CC_NG_TERM);
+        req.set_cc_node_group_id(cc_node_group_id_);
+        req.set_cc_ng_term(cc_node_group_term_);
         stub.Connect(&cntl, &req, &resp, nullptr);
         err = cntl.Failed() ? cntl.ErrorCode() : (resp.success() ? 0 : -1);
         if (err != 0)
@@ -247,7 +257,8 @@ private:
             LOG(ERROR) << "Log shipping agent of the log group #"
                        << log_group_id_
                        << " fails to establish the stream to the cc node at "
-                       << full_ip_;
+                       << full_ip_ << " err:" << cntl.ErrorText()
+                       << ", err_code:" << cntl.ErrorCode();
             return err;
         }
 
@@ -287,8 +298,8 @@ private:
         }
 
         ReplayMessage replay_msg;
-        replay_msg.set_cc_node_group_id(DEFAULT_CC_NG_ID);
-        replay_msg.set_cc_node_group_term(DEFAULT_CC_NG_TERM);
+        replay_msg.set_cc_node_group_id(cc_node_group_id_);
+        replay_msg.set_cc_node_group_term(cc_node_group_term_);
 
         std::string *log_records_blob = replay_msg.mutable_binary_log_records();
         log_records_blob->reserve(log_records_batch_size);
@@ -368,8 +379,8 @@ private:
         LOG(INFO) << "thread: " << std::this_thread::get_id()
                   << " send log item list to replay service.";
         ReplayMessage replay_msg;
-        replay_msg.set_cc_node_group_id(DEFAULT_CC_NG_ID);
-        replay_msg.set_cc_node_group_term(DEFAULT_CC_NG_TERM);
+        replay_msg.set_cc_node_group_id(cc_node_group_id_);
+        replay_msg.set_cc_node_group_term(cc_node_group_term_);
 
         std::string *log_records_blob = replay_msg.mutable_binary_log_records();
         log_records_blob->reserve(log_records_batch_size);
@@ -610,6 +621,8 @@ private:
     }
 
     const uint32_t log_group_id_;
+    const uint32_t cc_node_group_id_;
+    const int64_t cc_node_group_term_;
     const std::string full_ip_;
     brpc::Channel channel_;
     brpc::StreamWriteOptions stream_write_options_;
