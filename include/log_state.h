@@ -512,26 +512,21 @@ public:
 
     void UpdateCkptTs(uint64_t timestamp)
     {
-        std::atomic<uint64_t> &last_ckpt_ts = cc_ng_info_.last_ckpt_ts_;
-        uint64_t ts = last_ckpt_ts.load(std::memory_order_relaxed);
-        while (timestamp > ts)
+        std::unique_lock<std::shared_mutex> lk(log_state_mutex_);
+        if (timestamp >
+            cc_ng_info_.last_ckpt_ts_.load(std::memory_order_relaxed))
         {
-            if (last_ckpt_ts.compare_exchange_weak(
-                    ts, timestamp, std::memory_order_acq_rel))
+            uint32_t max_txn =
+                cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
+            int rc = PersistCkptAndMaxTxn(timestamp, max_txn);
+            while (rc != 0)
             {
-                TryCleanMultiStageOps();
-
-                uint32_t max_txn =
-                    cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
-
-                int rc = PersistCkptAndMaxTxn(ts, max_txn);
-                while (rc != 0)
-                {
-                    rc = PersistCkptAndMaxTxn(ts, max_txn);
-                }
-
-                break;
+                rc = PersistCkptAndMaxTxn(timestamp, max_txn);
             }
+
+            cc_ng_info_.last_ckpt_ts_.store(timestamp,
+                                            std::memory_order_release);
+            TryCleanMultiStageOps();
         }
     }
 
