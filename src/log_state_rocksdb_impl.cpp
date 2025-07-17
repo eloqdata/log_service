@@ -430,7 +430,8 @@ int LogStateRocksDBImpl::Start()
 
                         // The schema operation has been logged. Only
                         // updates the stage.
-                        assert(catalog_it->second.SchemaOpMsgCount() ==
+                        assert(static_cast<int>(
+                                   catalog_it->second.SchemaOpMsgCount()) ==
                                new_schemas_op_msg.size());
 
                         for (uint16_t idx = 0;
