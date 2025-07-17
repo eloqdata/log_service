@@ -73,7 +73,7 @@ class ItemIterator
 {
 public:
     explicit ItemIterator(std::vector<Item::Pointer> &&item_list)
-        : ddl_list_(std::move(item_list)), ddl_idx_(0){};
+        : ddl_list_(std::move(item_list)), ddl_idx_(0) {};
     virtual ~ItemIterator() = default;
     ItemIterator(const ItemIterator &) = delete;
     void operator=(const ItemIterator &) = delete;
