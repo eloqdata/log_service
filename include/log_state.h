@@ -215,14 +215,14 @@ public:
         return 0;
     }
 
-    void UpsertSchemaOp(uint64_t tx_no,
+    bool UpsertSchemaOp(uint64_t tx_no,
                         uint64_t commit_ts,
                         const SchemaOpMessage &schema_op)
     {
         int rc = PersistSchemaOp(tx_no, commit_ts, schema_op);
-        while (rc != 0)
+        if (rc != 0)
         {
-            rc = PersistSchemaOp(tx_no, commit_ts, schema_op);
+            return false;
         }
 
         std::unique_lock lk(log_state_mutex_);
@@ -240,7 +240,7 @@ public:
             {
                 LOG(INFO) << "duplicate prepare log detected, txn: " << tx_no
                           << ", ignore";
-                return;
+                return true;
             }
         }
         else
@@ -248,7 +248,7 @@ public:
             auto catalog_it = tx_catalog_ops_.find(tx_no);
             if (catalog_it == tx_catalog_ops_.end())
             {
-                return;
+                return true;
             }
 
             // The schema operation has been logged. Only updates the stage.
@@ -320,20 +320,21 @@ public:
             }
             else
             {
-                return;
+                return true;
             }
         }
+        return true;
     }
 
-    void UpsertSchemaOpWithinDML(
+    bool UpsertSchemaOpWithinDML(
         uint64_t tx_no,
         uint64_t commit_ts,
         const ::google::protobuf::RepeatedPtrField<SchemaOpMessage> &schemas_op)
     {
         int rc = PersistSchemasOp(tx_no, commit_ts, schemas_op);
-        while (rc != 0)
+        if (rc != 0)
         {
-            rc = PersistSchemasOp(tx_no, commit_ts, schemas_op);
+            return false;
         }
 
         // this func is called when on_apply processing WriteLogRequest, might
@@ -373,6 +374,7 @@ public:
                           << ", ignore";
             }
         }
+        return true;
     }
 
     std::pair<bool, SplitRangeOpMessage_Stage> SearchTxSplitRangeOp(
