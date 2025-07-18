@@ -795,15 +795,10 @@ int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
     std::array<char, 17> key{};
     std::string schemas_op_str;
     rocksdb::ReadOptions read_options;
-    rocksdb::Status rc;
 
     if (schema_op_msg.stage() == SchemaOpMessage_Stage_PrepareSchema)
     {
-        if (tx_catalog_ops_.find(txn) != tx_catalog_ops_.end())
-        {
-            LOG(WARNING) << "duplicated prepare log detected";
-            return 1;
-        }
+        assert(tx_catalog_ops_.find(txn) != tx_catalog_ops_.end());
         Serialize(key, timestamp, txn, static_cast<uint8_t>(MetaOp::SchemaOp));
         uint16_t cnt = 1;
         schemas_op_str.append(reinterpret_cast<char *>(&cnt), sizeof(cnt));
@@ -851,10 +846,10 @@ int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
         }
     }
 
-    rc = db_->Put(write_option_,
-                  meta_handle_,
-                  rocksdb::Slice(key.data(), key.size()),
-                  schemas_op_str);
+    rocksdb::Status rc = db_->Put(write_option_,
+                                  meta_handle_,
+                                  rocksdb::Slice(key.data(), key.size()),
+                                  schemas_op_str);
     return rc.ok() ? 0 : rc.code();
 }
 
