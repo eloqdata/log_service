@@ -215,40 +215,38 @@ public:
         return 0;
     }
 
-    void UpsertSchemaOp(uint64_t tx_no,
+    bool UpsertSchemaOp(uint64_t tx_no,
                         uint64_t commit_ts,
                         const SchemaOpMessage &schema_op)
     {
-        int rc = PersistSchemaOp(tx_no, commit_ts, schema_op);
-        while (rc != 0)
+        const SchemaOpMessage::Stage new_stage = schema_op.stage();
+        if (new_stage == SchemaOpMessage_Stage_PrepareSchema)
         {
-            rc = PersistSchemaOp(tx_no, commit_ts, schema_op);
-        }
-
-        std::unique_lock lk(log_state_mutex_);
-        assert(!schema_op.table_name_str().empty() &&
-               schema_op.table_type() == CcTableType::Primary);
-
-        SchemaOpMessage::Stage new_stage = schema_op.stage();
-        // only insert new entry at prepare stage
-        if (new_stage ==
-            SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareSchema)
-        {
+            // only insert new entry at prepare stage
             auto [it, success] =
                 tx_catalog_ops_.try_emplace(tx_no, schema_op, commit_ts);
             if (!success)
             {
                 LOG(INFO) << "duplicate prepare log detected, txn: " << tx_no
                           << ", ignore";
-                return;
+                return true;
             }
         }
-        else
+        if (PersistSchemaOp(tx_no, commit_ts, schema_op) != 0)
+        {
+            return false;
+        }
+
+        std::unique_lock lk(log_state_mutex_);
+        assert(!schema_op.table_name_str().empty() &&
+               schema_op.table_type() == CcTableType::Primary);
+
+        if (new_stage != SchemaOpMessage_Stage_PrepareSchema)
         {
             auto catalog_it = tx_catalog_ops_.find(tx_no);
             if (catalog_it == tx_catalog_ops_.end())
             {
-                return;
+                return true;
             }
 
             // The schema operation has been logged. Only updates the stage.
@@ -257,8 +255,7 @@ public:
             {
                 // For the schema operation that need to deal with the data,
                 // such as ADD INDEX.
-                if (new_stage ==
-                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData)
+                if (new_stage == SchemaOpMessage_Stage_PrepareData)
                 {
                     SchemaOpMessage &schema_op_msg = *catalog_op.GetSchemaOpMsg(
                         schema_op.table_name_str(), schema_op.table_type());
@@ -272,8 +269,7 @@ public:
                 // Encounter flush error after write prepare log. Need to
                 // set commit_ts_ to 0(previously set by prepare_log)
                 if (commit_ts == 0 &&
-                    new_stage == SchemaOpMessage_Stage::
-                                     SchemaOpMessage_Stage_CommitSchema)
+                    new_stage == SchemaOpMessage_Stage_CommitSchema)
                 {
                     catalog_op.SetCommitTs(0);
                 }
@@ -284,8 +280,7 @@ public:
                 // stage (prepare log) yet come to log service after clean
                 // log finished. The schema log will be erased when all node
                 // group's ckpt_ts are one hour greater than its commit ts.
-                if (new_stage ==
-                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_CleanSchema)
+                if (new_stage == SchemaOpMessage_Stage_CleanSchema)
                 {
                     // For pure DDL transactions, CatalogOp contains only
                     // one catalog image. For logical alter table DDL inside
@@ -306,8 +301,7 @@ public:
             }
             else if (new_stage == catalog_op.SchemasOpStage())
             {
-                if (new_stage ==
-                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData)
+                if (new_stage == SchemaOpMessage_Stage_PrepareData)
                 {
                     SchemaOpMessage &schema_op_msg = *catalog_op.GetSchemaOpMsg(
                         schema_op.table_name_str(), schema_op.table_type());
@@ -320,20 +314,21 @@ public:
             }
             else
             {
-                return;
+                return true;
             }
         }
+        return true;
     }
 
-    void UpsertSchemaOpWithinDML(
+    bool UpsertSchemaOpWithinDML(
         uint64_t tx_no,
         uint64_t commit_ts,
         const ::google::protobuf::RepeatedPtrField<SchemaOpMessage> &schemas_op)
     {
         int rc = PersistSchemasOp(tx_no, commit_ts, schemas_op);
-        while (rc != 0)
+        if (rc != 0)
         {
-            rc = PersistSchemasOp(tx_no, commit_ts, schemas_op);
+            return false;
         }
 
         // this func is called when on_apply processing WriteLogRequest, might
@@ -351,17 +346,13 @@ public:
             SchemaOpMessage::Stage old_stage = catalog_op.SchemasOpStage();
             if (new_stage > old_stage)
             {
-                if (new_stage == SchemaOpMessage_Stage::
-                                     SchemaOpMessage_Stage_CommitSchema &&
-                    old_stage == SchemaOpMessage_Stage::
-                                     SchemaOpMessage_Stage_PrepareSchema)
+                if (new_stage == SchemaOpMessage_Stage_CommitSchema &&
+                    old_stage == SchemaOpMessage_Stage_PrepareSchema)
                 {
                     catalog_op.CommitAll();
                 }
-                else if (new_stage == SchemaOpMessage_Stage::
-                                          SchemaOpMessage_Stage_CleanSchema &&
-                         old_stage == SchemaOpMessage_Stage::
-                                          SchemaOpMessage_Stage_CommitSchema)
+                else if (new_stage == SchemaOpMessage_Stage_CleanSchema &&
+                         old_stage == SchemaOpMessage_Stage_CommitSchema)
                 {
                     catalog_op.ClearAll();
                 }
@@ -373,6 +364,7 @@ public:
                           << ", ignore";
             }
         }
+        return true;
     }
 
     std::pair<bool, SplitRangeOpMessage_Stage> SearchTxSplitRangeOp(
@@ -406,8 +398,7 @@ public:
 
         SplitRangeOpMessage::Stage new_stage = split_range_op_message.stage();
         // only insert new entry at prepare stage
-        if (new_stage ==
-            SplitRangeOpMessage_Stage::SplitRangeOpMessage_Stage_PrepareSplit)
+        if (new_stage == SplitRangeOpMessage_Stage_PrepareSplit)
         {
             auto [it, success] = tx_split_range_ops_.try_emplace(
                 tx_num, split_range_op_message, commit_ts);
@@ -431,8 +422,7 @@ public:
                 split_range_op_it->second.split_range_op_message_;
             if (new_stage > split_range_msg.stage())
             {
-                if (new_stage == SplitRangeOpMessage_Stage::
-                                     SplitRangeOpMessage_Stage_CommitSplit)
+                if (new_stage == SplitRangeOpMessage_Stage_CommitSplit)
                 {
                     // slice specs are just written in commit stage log.
                     split_range_msg.clear_slice_keys();
@@ -734,7 +724,8 @@ protected:
                 bool all_cleaned =
                     std::all_of(schemas_op_msg_.begin(),
                                 schemas_op_msg_.end(),
-                                [](const SchemaOpMessage &schema_op_msg) {
+                                [](const SchemaOpMessage &schema_op_msg)
+                                {
                                     return schema_op_msg.stage() ==
                                            SchemaOpMessage_Stage_CleanSchema;
                                 });
@@ -747,7 +738,8 @@ protected:
                 bool all_committed =
                     std::all_of(schemas_op_msg_.begin(),
                                 schemas_op_msg_.end(),
-                                [](const SchemaOpMessage &schema_op_msg) {
+                                [](const SchemaOpMessage &schema_op_msg)
+                                {
                                     return schema_op_msg.stage() ==
                                            SchemaOpMessage_Stage_CommitSchema;
                                 });
