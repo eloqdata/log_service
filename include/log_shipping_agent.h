@@ -246,8 +246,6 @@ private:
         LogReplayConnectRequest req;
         LogReplayConnectResponse resp;
         req.set_log_group_id(log_group_id_);
-        // req.set_cc_node_group_id(DEFAULT_CC_NG_ID);
-        // req.set_cc_ng_term(DEFAULT_CC_NG_TERM);
         req.set_cc_node_group_id(cc_node_group_id_);
         req.set_cc_ng_term(cc_node_group_term_);
         stub.Connect(&cntl, &req, &resp, nullptr);
