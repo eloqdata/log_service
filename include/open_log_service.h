@@ -131,6 +131,33 @@ public:
     {
     }
 
+    void AddPeer(::google::protobuf::RpcController *controller,
+                 const AddPeerRequest *request,
+                 ChangePeersResponse *response,
+                 google::protobuf::Closure *done) override
+    {
+        LOG(WARNING) << "AddPeer not implemented";
+        assert(false);
+    }
+
+    void RemovePeer(::google::protobuf::RpcController *controller,
+                    const RemovePeerRequest *request,
+                    ChangePeersResponse *response,
+                    google::protobuf::Closure *done) override
+    {
+        LOG(WARNING) << "RemovePeer not implemented";
+        assert(false);
+    }
+
+    void GetLogGroupConfig(::google::protobuf::RpcController *controller,
+                           const GetLogGroupConfigRequest *request,
+                           GetLogGroupConfigResponse *response,
+                           ::google::protobuf::Closure *done) override
+    {
+        LOG(WARNING) << "GetLogGroupConfig not implemented";
+        assert(false);
+    }
+
     int Start(LogState *log_state, uint32_t worker_concurrency = 4);
     void Shutdown();
 
