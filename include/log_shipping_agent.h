@@ -451,8 +451,8 @@ private:
                     int cnt = 0;
                     int msg_cnt = 0;
                     ReplayMessage replay_msg;
-                    replay_msg.set_cc_node_group_id(DEFAULT_CC_NG_ID);
-                    replay_msg.set_cc_node_group_term(DEFAULT_CC_NG_TERM);
+                    replay_msg.set_cc_node_group_id(cc_node_group_id_);
+                    replay_msg.set_cc_node_group_term(cc_node_group_term_);
 
                     std::string *log_records_blob =
                         replay_msg.mutable_binary_log_records();
