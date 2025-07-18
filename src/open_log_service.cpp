@@ -26,6 +26,8 @@
 
 namespace txlog
 {
+static int64_t DEFAULT_CC_NG_TERM = 1;
+
 thread_local size_t OpenLogServiceImpl::received_task_cnt_ = 0;
 
 void OpenLogServiceImpl::WriteLog(::google::protobuf::RpcController *controller,
@@ -68,7 +70,7 @@ void OpenLogServiceImpl::ReplayLog(
     const std::string &cc_node_ip = req.source_ip();
     uint16_t cc_node_port = req.source_port();
 
-    uint64_t last_ckpt_ts = log_state_->LastCkptTimestamp();
+    uint64_t last_ckpt_ts = log_state_->LastCkptTimestamp(cc_ng_id);
     // get log list since last_ckpt_ts+1
     // 0 indicates no checkpoint happened
     uint64_t start_ts = last_ckpt_ts == 0 ? 0 : last_ckpt_ts + 1;
@@ -78,7 +80,7 @@ void OpenLogServiceImpl::ReplayLog(
     }
     LOG(INFO) << "Start replaying from timestamp " << start_ts;
 
-    auto [ok, iterator] = log_state_->GetLogReplayList(start_ts);
+    auto [ok, iterator] = log_state_->GetLogReplayList(cc_ng_id, start_ts);
 
     if (!ok)
     {
@@ -87,7 +89,7 @@ void OpenLogServiceImpl::ReplayLog(
         return;
     }
 
-    uint32_t latest_txn_no = log_state_->LatestCommittedTxnNumber();
+    uint32_t latest_txn_no = log_state_->LatestCommittedTxnNumber(cc_ng_id);
 
     std::unique_lock<std::mutex> lk(log_replay_workers_mutex_);
 
