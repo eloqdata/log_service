@@ -221,6 +221,10 @@ public:
     {
         std::unique_lock lk(log_state_mutex_);
         const SchemaOpMessage::Stage new_stage = schema_op.stage();
+
+        assert(!schema_op.table_name_str().empty() &&
+               schema_op.table_type() == CcTableType::Primary);
+
         if (new_stage == SchemaOpMessage_Stage_PrepareSchema)
         {
             if (tx_catalog_ops_.find(txn) != tx_catalog_ops_.end())
@@ -229,13 +233,6 @@ public:
                           << ", ignore";
                 return 0;
             }
-        }
-
-        assert(!schema_op.table_name_str().empty() &&
-               schema_op.table_type() == CcTableType::Primary);
-
-        if (new_stage == SchemaOpMessage_Stage_PrepareSchema)
-        {
             std::string schemas_op_str;
             assert(tx_catalog_ops_.find(txn) == tx_catalog_ops_.end());
             uint16_t cnt = 1;
