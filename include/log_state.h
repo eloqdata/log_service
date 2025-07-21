@@ -222,17 +222,16 @@ public:
         const SchemaOpMessage::Stage new_stage = schema_op.stage();
         if (new_stage == SchemaOpMessage_Stage_PrepareSchema)
         {
-            // only insert new entry at prepare stage
-            auto [it, success] =
-                tx_catalog_ops_.try_emplace(tx_no, schema_op, commit_ts);
-            if (!success)
+            std::unique_lock lk(log_state_mutex_);
+            if (tx_catalog_ops_.find(tx_no) != tx_catalog_ops_.end())
             {
                 LOG(INFO) << "duplicate prepare log detected, txn: " << tx_no
                           << ", ignore";
                 return 0;
             }
         }
-        if (const auto rc = PersistSchemaOp(tx_no, commit_ts, schema_op); rc != 0)
+        if (const auto rc = PersistSchemaOp(tx_no, commit_ts, schema_op);
+            rc != 0)
         {
             LOG(ERROR) << "PersistSchemaOp failed, rc: " << rc;
             return 1;
@@ -242,7 +241,18 @@ public:
         assert(!schema_op.table_name_str().empty() &&
                schema_op.table_type() == CcTableType::Primary);
 
-        if (new_stage != SchemaOpMessage_Stage_PrepareSchema)
+        if (new_stage == SchemaOpMessage_Stage_PrepareSchema)
+        {
+            auto [it, success] =
+                tx_catalog_ops_.try_emplace(tx_no, schema_op, commit_ts);
+            if (!success)
+            {
+                LOG(INFO) << "duplicate prepare log detected, txn: " << tx_no
+                          << ", ignore";
+                return 1;
+            }
+        }
+        else
         {
             auto catalog_it = tx_catalog_ops_.find(tx_no);
             if (catalog_it == tx_catalog_ops_.end())
@@ -326,7 +336,8 @@ public:
         uint64_t commit_ts,
         const ::google::protobuf::RepeatedPtrField<SchemaOpMessage> &schemas_op)
     {
-        if (const auto rc = PersistSchemasOp(tx_no, commit_ts, schemas_op); rc != 0)
+        if (const auto rc = PersistSchemasOp(tx_no, commit_ts, schemas_op);
+            rc != 0)
         {
             LOG(ERROR) << "PersistSchemasOp failed, rc: " << rc;
             return 1;
