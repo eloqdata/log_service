@@ -549,12 +549,7 @@ public:
 
     uint32_t LatestCommittedTxnNumber() const
     {
-        auto cc_ng_info_latest_txn_no =
-            cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
-        return cc_ng_info_latest_txn_no - latest_meta_tx_number_ <
-                       UINT32_MAX >> 1
-                   ? cc_ng_info_latest_txn_no
-                   : latest_meta_tx_number_;
+        return cc_ng_info_.latest_txn_no_;
     }
 
     void UpdateLatestCommittedTxnNumber(uint32_t tx_ident)
@@ -965,11 +960,5 @@ protected:
         ClusterScaleOpMessage cluster_scale_op_message_;
         uint64_t commit_ts_;
     };
-
-    /**
-     * Used for avoiding reusing tx number of tx which has not been replayed
-     */
-    uint64_t max_meta_commit_ts_{0};
-    uint32_t latest_meta_tx_number_{0};
 };
 }  // namespace txlog

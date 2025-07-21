@@ -316,15 +316,18 @@ int LogStateRocksDBImpl::Start()
         // last_ckpt_ts
         std::array<char, 17> key;
         std::string value;
-        Serialize(
-            key, UINT64_MAX, UINT64_MAX, (uint8_t) LogState::MetaOp::LastCkpt);
+        Serialize(key,
+                  UINT64_MAX,
+                  UINT64_MAX,
+                  static_cast<uint8_t>(LogState::MetaOp::LastCkpt));
         rocksdb::Status rc = db_->Get(read_options,
                                       meta_handle_,
                                       rocksdb::Slice(key.data(), key.size()),
                                       &value);
         if (rc.ok())
         {
-            cc_ng_info_.last_ckpt_ts_ = *((uint64_t *) value.data());
+            cc_ng_info_.last_ckpt_ts_ =
+                *reinterpret_cast<uint64_t *>(value.data());
         }
         else if (rc.IsNotFound())
         {
@@ -479,11 +482,14 @@ int LogStateRocksDBImpl::Start()
                     }
                 }
 
-                if (timestamp > max_meta_commit_ts_)
+                uint32_t latest_txn_no =
+                    cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
+                if (static_cast<int32_t>(
+                        static_cast<uint32_t>(tx_number & 0xFFFFFFFF) -
+                        latest_txn_no) > 0)
                 {
-                    max_meta_commit_ts_ = timestamp;
-                    latest_meta_tx_number_ =
-                        static_cast<uint32_t>(tx_number & 0xFFFFFFFFu);
+                    cc_ng_info_.latest_txn_no_.store(latest_txn_no,
+                                                     std::memory_order_relaxed);
                 }
                 // Move to the next key
                 it->Next();
