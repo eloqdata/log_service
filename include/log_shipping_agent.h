@@ -39,10 +39,6 @@
 
 namespace txlog
 {
-
-static int64_t DEFAULT_CC_NG_TERM = 1;
-static uint32_t DEFAULT_CC_NG_ID = 0;
-
 /*
  * Agent to ship redo log records to cc node leader, who is waiting for
  * uncheckpointed log record to replay. Shipping agent is implemented as a
@@ -498,8 +494,12 @@ private:
                                 msg_cnt++;
                                 replay_msg.clear_binary_log_records();
                             }
-
-                            AppendLogBlob(*log_records_blob, item);
+                            // filter out log items not belong the
+                            // cc_node_group_id_
+                            if (item.cc_ng_ == cc_node_group_id_)
+                            {
+                                AppendLogBlob(*log_records_blob, item);
+                            }
                         }
                     }
                     int err = SendMessage(replay_msg, buf, false, eagain);

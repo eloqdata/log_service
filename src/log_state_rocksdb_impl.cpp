@@ -55,14 +55,15 @@ LogStateRocksDBImpl::~LogStateRocksDBImpl()
 }
 
 int LogStateRocksDBImpl::AddLogItemBatch(
-    const std::vector<std::tuple<uint64_t, uint64_t, std::string>> &batch_logs)
+    const std::vector<std::tuple<uint32_t, uint64_t, uint64_t, std::string>>
+        &batch_logs)
 {
     rocksdb::WriteBatch batch;
 
-    for (const auto &[tx_number, timestamp, log_message] : batch_logs)
+    for (const auto &[cc_ng_id, tx_number, timestamp, log_message] : batch_logs)
     {
-        std::array<char, 16> key{};
-        Serialize(key, timestamp, tx_number);
+        std::array<char, 20> key{};
+        Serialize(key, timestamp, cc_ng_id, tx_number);
         batch.Put(rocksdb::Slice(key.data(), key.size()), log_message);
     }
 
@@ -77,12 +78,14 @@ int LogStateRocksDBImpl::AddLogItemBatch(
     return (int) status.code();
 }
 
-int LogStateRocksDBImpl::AddLogItem(uint64_t tx_number,
+int LogStateRocksDBImpl::AddLogItem(uint32_t cc_ng_id,
+                                    uint64_t tx_number,
                                     uint64_t timestamp,
                                     const std::string &log_message)
 {
-    std::array<char, 16> key{};
-    Serialize(key, timestamp, tx_number);
+    std::array<char, 20> key{};
+    Serialize(key, timestamp, cc_ng_id, tx_number);
+
     rocksdb::Status status = db_->Put(
         write_option_, rocksdb::Slice(key.data(), key.size()), log_message);
     if (!status.ok())
@@ -97,7 +100,8 @@ int LogStateRocksDBImpl::AddLogItem(uint64_t tx_number,
 }
 
 std::pair<bool, std::unique_ptr<ItemIterator>>
-LogStateRocksDBImpl::GetLogReplayList(uint64_t start_timestamp)
+LogStateRocksDBImpl::GetLogReplayList(uint32_t node_group_id,
+                                      uint64_t start_timestamp)
 {
     std::vector<Item::Pointer> ddl_list;
 
@@ -110,14 +114,17 @@ LogStateRocksDBImpl::GetLogReplayList(uint64_t start_timestamp)
     LOG(INFO) << "split_range_op_list size: " << rs_size;
 
     std::unique_ptr<ItemIterator> result =
-        std::make_unique<ItemIteratorRocksDBImpl>(
-            rocksdb_scan_threads_, std::move(ddl_list), db_, start_timestamp);
+        std::make_unique<ItemIteratorRocksDBImpl>(rocksdb_scan_threads_,
+                                                  std::move(ddl_list),
+                                                  db_,
+                                                  start_timestamp,
+                                                  node_group_id);
 
     return std::make_pair(true, std::move(result));
 }
 
 std::pair<bool, Item::Pointer> LogStateRocksDBImpl::SearchTxDataLog(
-    uint64_t tx_number, uint64_t lower_bound_ts)
+    uint64_t tx_number, uint32_t ng_id, uint64_t lower_bound_ts)
 {
     LOG(INFO) << "log state search tx: " << tx_number
               << ", lower_bound_ts: " << lower_bound_ts;
@@ -130,7 +137,7 @@ std::pair<bool, Item::Pointer> LogStateRocksDBImpl::SearchTxDataLog(
     }
     else
     {
-        start_ts = LastCkptTimestamp();
+        start_ts = LastCkptTimestamp(ng_id);
         if (start_ts != 0)  // 0 indicates no checkpoint happened
         {
             start_ts += 1;
@@ -139,8 +146,8 @@ std::pair<bool, Item::Pointer> LogStateRocksDBImpl::SearchTxDataLog(
     LOG(INFO) << "iterate log records, start ts: " << start_ts;
 
     // iterate log records in range [start, limit)
-    std::array<char, 16> start_key{};
-    Serialize(start_key, start_ts, 0);
+    std::array<char, 20> start_key{};
+    Serialize(start_key, start_ts, ng_id, 0);
     rocksdb::Slice start(start_key.data(), start_key.size());
     rocksdb::ReadOptions read_option;
     // set iterate_upper_bound for read_option for better performance
@@ -159,9 +166,10 @@ std::pair<bool, Item::Pointer> LogStateRocksDBImpl::SearchTxDataLog(
         // key_sv is in form of timestamp(8) + tx_no(8)
         if (key_sv.compare(8, 8, target_txn.data(), 8) == 0)
         {
+            uint32_t ng;
             uint64_t ts;
             uint64_t tx_no;
-            Deserialize(it->key(), ts, tx_no);
+            Deserialize(it->key(), ts, ng, tx_no);
             LOG(INFO) << "Found matching key, tx_no: " << tx_no
                       << ", timestamp: " << ts;
             ptr = std::make_shared<Item>(
@@ -322,22 +330,20 @@ int LogStateRocksDBImpl::Start()
                                       meta_handle_,
                                       rocksdb::Slice(key.data(), key.size()),
                                       &value);
-        if (rc.ok())
+
+        uint32_t ng_id;
+        uint64_t ts;
+        size_t offset = 0;
+        char *ptr = value.data();
+        while (offset < value.size())
         {
-            cc_ng_info_.last_ckpt_ts_ = *((uint64_t *) value.data());
-        }
-        else if (rc.IsNotFound())
-        {
-            cc_ng_info_.last_ckpt_ts_ = 0;
-        }
-        else
-        {
-            LOG(ERROR) << "Failed to get last checkpoint timestamp from "
-                          "rocksdb, rocksdb storage path: "
-                       << rocksdb_storage_path_
-                       << ", error message: " << rc.ToString();
-            assert(false);
-            return -1;
+            ng_id = *((uint32_t *) ptr);
+            ptr += sizeof(uint32_t);
+            offset += sizeof(uint32_t);
+            ts = *((uint64_t *) ptr);
+            ptr += sizeof(uint64_t);
+            offset += sizeof(uint64_t);
+            cc_ng_info_.try_emplace(ng_id, "", 0, 0, ts);
         }
 
         // latest_txn_no
@@ -347,23 +353,18 @@ int LogStateRocksDBImpl::Start()
                       meta_handle_,
                       rocksdb::Slice(key.data(), key.size()),
                       &value);
-
-        if (rc.ok())
+        ptr = value.data();
+        offset = 0;
+        uint32_t txn_no;
+        while (offset < value.size())
         {
-            cc_ng_info_.latest_txn_no_ = *((uint32_t *) value.data());
-        }
-        else if (rc.IsNotFound())
-        {
-            cc_ng_info_.latest_txn_no_ = 0;
-        }
-        else
-        {
-            LOG(ERROR)
-                << "Failed to get last txn from rocksdb, rocksdb storage path: "
-                << rocksdb_storage_path_
-                << ", error message: " << rc.ToString();
-            assert(false);
-            return -1;
+            ng_id = *((uint32_t *) ptr);
+            ptr += sizeof(uint32_t);
+            offset += sizeof(uint32_t);
+            txn_no = *((uint32_t *) ptr);
+            ptr += sizeof(uint32_t);
+            offset += sizeof(uint32_t);
+            cc_ng_info_[ng_id].latest_txn_no_ = txn_no;
         }
 
         // tx_catalog_ops and tx_split_range_ops_
@@ -430,9 +431,8 @@ int LogStateRocksDBImpl::Start()
 
                         // The schema operation has been logged. Only
                         // updates the stage.
-                        assert(static_cast<int>(
-                                   catalog_it->second.SchemaOpMsgCount()) ==
-                               new_schemas_op_msg.size());
+                        assert(catalog_it->second.SchemaOpMsgCount() ==
+                               static_cast<size_t>(new_schemas_op_msg.size()));
 
                         for (uint16_t idx = 0;
                              idx < catalog_it->second.SchemaOpMsgCount();
@@ -537,8 +537,10 @@ void LogStateRocksDBImpl::StopRocksDB()
 void LogStateRocksDBImpl::PrintKey(rocksdb::Slice key)
 {
     uint64_t timestamp, tx_no;
-    Deserialize(key, timestamp, tx_no);
-    LOG(INFO) << "timestamp: " << timestamp << ",\ttx_number: " << tx_no;
+    uint32_t ng_id;
+    Deserialize(key, timestamp, ng_id, tx_no);
+    LOG(INFO) << "timestamp: " << timestamp << ",\tng_id: " << ng_id
+              << ",\ttx_number: " << tx_no;
 }
 
 /**
@@ -671,13 +673,16 @@ void LogStateRocksDBImpl::PurgingSstFiles()
                       << static_cast<double>(sst_files_size_) / 1024 / 1024
                       << "MB, purge sst files";
 
-            const auto &ng_info = GetCcNgInfo();
-            // find last_ckpt_ts
-            uint64_t min_last_ckpt_ts = ng_info.last_ckpt_ts_;
-            if (min_last_ckpt_ts == 0)
+            const std::unordered_map<uint32_t, CcNgInfo> ng_info_map =
+                GetCopyOfCcNgInfo();
+            // find the minimum last_ckpt_ts from all cc_ngs
+            uint64_t min_last_ckpt_ts = UINT64_MAX;
+            uint32_t max_cc_ng_id = 0;
+            for (const auto &ng_info : ng_info_map)
             {
-                LOG(INFO) << "No checkpoint found, skip purge sst files";
-                continue;
+                min_last_ckpt_ts =
+                    std::min(min_last_ckpt_ts, ng_info.second.last_ckpt_ts_);
+                max_cc_ng_id = std::max(max_cc_ng_id, ng_info.first);
             }
 
             if (min_last_ckpt_ts <= last_purging_sst_ckpt_ts_)
@@ -697,10 +702,10 @@ void LogStateRocksDBImpl::PurgingSstFiles()
             // all log entries before the min_last_ckpt_ts belongs to all cc
             // node group could be deleted
             min_last_ckpt_ts -= 1;
-            std::array<char, 16> start_key{};
-            std::array<char, 16> end_key{};
-            Serialize(start_key, 0, 0);
-            Serialize(end_key, min_last_ckpt_ts, 0);
+            std::array<char, 20> start_key{};
+            std::array<char, 20> end_key{};
+            Serialize(start_key, 0, 0, 0);
+            Serialize(end_key, min_last_ckpt_ts, max_cc_ng_id, 0);
             rocksdb::Slice start(start_key.data(), start_key.size());
             rocksdb::Slice end(end_key.data(), end_key.size());
 
@@ -715,16 +720,19 @@ void LogStateRocksDBImpl::PurgingSstFiles()
                     rocksdb::Slice largestkey(meta.largestkey);
 #ifndef NDEBUG
                     uint64_t sk_ts, sk_tx_no;
-                    assert(smallestkey.size() == 16);
-                    Deserialize(smallestkey, sk_ts, sk_tx_no);
+                    uint32_t sk_ng_id;
+                    assert(smallestkey.size() == 20);
+                    Deserialize(smallestkey, sk_ts, sk_ng_id, sk_tx_no);
                     uint64_t lk_ts, lk_tx_no;
-                    assert(largestkey.size() == 16);
-                    Deserialize(largestkey, lk_ts, lk_tx_no);
+                    uint32_t lk_ng_id;
+                    assert(largestkey.size() == 20);
+                    Deserialize(largestkey, lk_ts, lk_ng_id, lk_tx_no);
                     DLOG(INFO)
                         << "sst file: " << meta.name << ", size: " << meta.size
                         << ", level: " << meta.level
-                        << " smallest key: " << sk_ts << ", " << sk_tx_no
-                        << " largest key: " << lk_ts << ", " << lk_tx_no;
+                        << " smallest key: " << sk_ts << ", " << sk_ng_id
+                        << ", " << sk_tx_no << " largest key: " << lk_ts << ", "
+                        << lk_ng_id << ", " << lk_tx_no;
 #endif
 
                     // without compaction, sst files must in level 0
@@ -772,16 +780,19 @@ void LogStateRocksDBImpl::PurgingSstFiles()
                     rocksdb::Slice smallestkey(meta.smallestkey);
                     rocksdb::Slice largestkey(meta.largestkey);
                     uint64_t sk_ts, sk_tx_no;
-                    assert(smallestkey.size() == 16);
-                    Deserialize(smallestkey, sk_ts, sk_tx_no);
+                    uint32_t sk_ng_id;
+                    assert(smallestkey.size() == 20);
+                    Deserialize(smallestkey, sk_ts, sk_ng_id, sk_tx_no);
                     uint64_t lk_ts, lk_tx_no;
-                    assert(largestkey.size() == 16);
-                    Deserialize(largestkey, lk_ts, lk_tx_no);
+                    uint32_t lk_ng_id;
+                    assert(largestkey.size() == 20);
+                    Deserialize(largestkey, lk_ts, lk_ng_id, lk_tx_no);
                     DLOG(INFO)
                         << "sst file: " << meta.name << ", size: " << meta.size
                         << ", level: " << meta.level
-                        << " smallest key: " << sk_ts << ", " << sk_tx_no
-                        << " largest key: " << lk_ts << ", " << lk_tx_no;
+                        << " smallest key: " << sk_ts << ", " << sk_ng_id
+                        << ", " << sk_tx_no << " largest key: " << lk_ts << ", "
+                        << lk_ng_id << ", " << lk_tx_no;
                 }
             }
 #endif
@@ -810,10 +821,24 @@ int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
 
     if (rc.IsNotFound())
     {
-        schema_op_msg.SerializeToString(&schemas_op_str);
+        // schema_op_msg.SerializeToString(&schemas_op_str);
+        uint16_t cnt = 1;
+        schemas_op_str.append(reinterpret_cast<char *>(&cnt), sizeof(cnt));
+
+        std::string str = schema_op_msg.SerializeAsString();
+        uint32_t len = str.size();
+        schemas_op_str.append(reinterpret_cast<char *>(&len), sizeof(len));
+        schemas_op_str += str;
+
+        DLOG(INFO) << "schema_op_msg.SerializeToString===key-size:"
+                   << key.size() << ", schema-size:" << schemas_op_str.size()
+                   << ", tx:" << txn;
     }
     else
     {
+        DLOG(INFO) << "schema_op_msg found===key-size:" << key.size()
+                   << ", schema-size:" << schemas_op_str.size()
+                   << ", tx:" << txn;
         SchemaOpMessage schema_op_msg_stored;
 
         char *ptr = schemas_op_str.data();
@@ -837,8 +862,10 @@ int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
         }
     }
 
-    rc = db_->Put(
-        write_option_, rocksdb::Slice(key.data(), key.size()), schemas_op_str);
+    rc = db_->Put(write_option_,
+                  meta_handle_,
+                  rocksdb::Slice(key.data(), key.size()),
+                  schemas_op_str);
     return rc.ok() ? 0 : rc.code();
 }
 
@@ -927,32 +954,53 @@ int LogStateRocksDBImpl::DeleteRangeOp(uint64_t txn, uint64_t timestamp)
     return rc.ok() ? 0 : rc.code();
 }
 
-int LogStateRocksDBImpl::PersistCkptAndMaxTxn(uint64_t ckpt_ts,
-                                              uint32_t max_txn)
+int LogStateRocksDBImpl::PersistCkptAndMaxTxn(
+    const std::unordered_map<uint32_t, CcNgInfo> &ng_infos)
 {
-    const char *ckpt_ptr = (const char *) (&ckpt_ts);
-    const char *txn_ptr = (const char *) (&max_txn);
-
     std::array<char, 17> key;
-
     Serialize(
         key, UINT64_MAX, UINT64_MAX, (uint8_t) LogState::MetaOp::LastCkpt);
-    rocksdb::Status rc = db_->Put(write_option_,
-                                  meta_handle_,
-                                  rocksdb::Slice(key.data(), key.size()),
-                                  rocksdb::Slice(ckpt_ptr, sizeof(uint64_t)));
+    std::string ckpt_str;
+    ckpt_str.reserve(ng_infos.size() * sizeof(uint32_t) +
+                     ng_infos.size() * sizeof(uint64_t));
+    for (const auto &ng_info : ng_infos)
+    {
+        ckpt_str.append(reinterpret_cast<const char *>(&ng_info.first),
+                        sizeof(uint32_t));
+        ckpt_str.append(
+            reinterpret_cast<const char *>(&ng_info.second.last_ckpt_ts_),
+            sizeof(uint64_t));
+    }
+
+    rocksdb::Status rc =
+        db_->Put(write_option_,
+                 meta_handle_,
+                 rocksdb::Slice(key.data(), key.size()),
+                 rocksdb::Slice(ckpt_str.data(), ckpt_str.size()));
     if (!rc.ok())
     {
         LOG(ERROR) << "PersistCkptAndMaxTxn (LastCkpt) failed, error: "
-                   << rc.ToString() << ", ckpt_ts: " << ckpt_ts;
+                   << rc.ToString();
         return rc.code();
     }
 
     Serialize(key, UINT64_MAX, UINT64_MAX, (uint8_t) LogState::MetaOp::MaxTxn);
+    std::string txn_str;
+    txn_str.reserve(ng_infos.size() * sizeof(uint32_t) +
+                    ng_infos.size() * sizeof(uint32_t));
+    for (const auto &ng_info : ng_infos)
+    {
+        txn_str.append(reinterpret_cast<const char *>(&ng_info.first),
+                       sizeof(uint32_t));
+        txn_str.append(
+            reinterpret_cast<const char *>(&ng_info.second.latest_txn_no_),
+            sizeof(uint32_t));
+    }
+
     rc = db_->Put(write_option_,
                   meta_handle_,
                   rocksdb::Slice(key.data(), key.size()),
-                  rocksdb::Slice(txn_ptr, sizeof(uint32_t)));
+                  rocksdb::Slice(txn_str.data(), txn_str.size()));
 
     return rc.ok() ? 0 : rc.code();
 }
@@ -982,10 +1030,11 @@ uint64_t LogStateRocksDBImpl::GetApproximateReplayLogSize()
         {
             rocksdb::Slice largestkey(meta.largestkey);
             uint64_t lk_ts, lk_tx_no;
+            uint32_t ng_id;
             assert(largestkey.size() == 16);
-            Deserialize(largestkey, lk_ts, lk_tx_no);
+            Deserialize(largestkey, lk_ts, ng_id, lk_tx_no);
 
-            if (cc_ng_info_.last_ckpt_ts_ <= lk_ts)
+            if (cc_ng_info_[ng_id].last_ckpt_ts_ <= lk_ts)
             {
                 DLOG(INFO) << "SSTable " << meta.name
                            << " used in replay with size: "

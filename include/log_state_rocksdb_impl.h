@@ -53,9 +53,10 @@ using current_time_func = std::function<std::time_t(std::time_t *arg)>;
 
 namespace txlog
 {
-// commit_ts(8)----tx_number(8)
-inline void Serialize(std::array<char, 16> &res,
+// Serialize DML op key: commit_ts(8)--ng_id(4)--tx_number(8)
+inline void Serialize(std::array<char, 20> &res,
                       uint64_t timestamp,
+                      uint32_t ng_id,
                       uint64_t tx_number)
 {
     char *p = res.data();
@@ -63,12 +64,36 @@ inline void Serialize(std::array<char, 16> &res,
     std::memcpy(p, &ts_be, sizeof(uint64_t));
 
     p += sizeof(uint64_t);
+    uint32_t ng_id_be = __builtin_bswap32(ng_id);
+    std::memcpy(p, &ng_id_be, sizeof(uint32_t));
 
+    p += sizeof(uint32_t);
     uint64_t tx_no_be = __builtin_bswap64(tx_number);
     std::memcpy(p, &tx_no_be, sizeof(uint64_t));
 }
 
-// tx_number(8)----commit_ts(8)----code(1)
+inline void Deserialize(rocksdb::Slice key,
+                        uint64_t &timestamp,
+                        uint32_t &ng_id,
+                        uint64_t &tx_number)
+{
+    assert(key.size() == 20);
+    const char *p = key.data();
+    uint64_t ts_be, tx_no_be;
+    std::memcpy(&ts_be, p, sizeof(uint64_t));
+    timestamp = __builtin_bswap64(ts_be);
+
+    p += sizeof(uint64_t);
+    uint32_t ng_id_be;
+    std::memcpy(&ng_id_be, p, sizeof(uint32_t));
+    ng_id = __builtin_bswap32(ng_id_be);
+
+    p += sizeof(uint32_t);
+    std::memcpy(&tx_no_be, p, sizeof(uint64_t));
+    tx_number = __builtin_bswap64(tx_no_be);
+}
+
+// Serialize DDL op key: tx_number(8)----commit_ts(8)----code(1)
 inline void Serialize(std::array<char, 17> &res,
                       uint64_t timestamp,
                       uint64_t tx_number,
@@ -85,21 +110,6 @@ inline void Serialize(std::array<char, 17> &res,
     p += sizeof(uint64_t);
 
     res[res.size() - 1] = (char) code;
-}
-
-inline void Deserialize(rocksdb::Slice key,
-                        uint64_t &timestamp,
-                        uint64_t &tx_number)
-{
-    assert(key.size() == 16);
-    const char *p = key.data();
-    uint64_t ts_be, tx_no_be;
-    std::memcpy(&ts_be, p, sizeof(uint64_t));
-    timestamp = __builtin_bswap64(ts_be);
-    p += sizeof(uint64_t);
-
-    std::memcpy(&tx_no_be, p, sizeof(uint64_t));
-    tx_number = __builtin_bswap64(tx_no_be);
 }
 
 inline void Deserialize(
@@ -165,13 +175,14 @@ public:
 #else
                                      rocksdb::DB *db,
 #endif
-                                     uint64_t start_ts)
+                                     uint64_t start_ts,
+                                     uint32_t target_ng)
         : ItemIterator(std::move(ddl_list)),
           db_(db),
           start_key_(start_key_storage_.data(), start_key_storage_.size()),
           worker_num_(worker_num)
     {
-        Serialize(start_key_storage_, start_ts, 0);
+        Serialize(start_key_storage_, start_ts, target_ng, 0);
         rocksdb::ReadOptions read_options;
         // set iterate_lower_bound for read_options for better performance
         read_options.iterate_lower_bound = &start_key_;
@@ -180,13 +191,14 @@ public:
             std::unique_ptr<rocksdb::Iterator>(db_->NewIterator(read_options));
         uint64_t first_ts = 0;
         uint64_t last_ts = 0;
+        uint32_t tmp_ng;
         uint64_t tmp_txn;
         rocksdb_iterator_->SeekToFirst();
         if (!rocksdb_iterator_->Valid())
         {
             return;
         }
-        Deserialize(rocksdb_iterator_->key(), first_ts, tmp_txn);
+        Deserialize(rocksdb_iterator_->key(), first_ts, tmp_ng, tmp_txn);
         rocksdb_iterator_->SeekToLast();
         if (!rocksdb_iterator_->Valid())
         {
@@ -194,7 +206,7 @@ public:
         }
         keys_storage_.reserve(worker_num_ * 2);
         keys_.reserve(worker_num_ * 2);
-        Deserialize(rocksdb_iterator_->key(), last_ts, tmp_txn);
+        Deserialize(rocksdb_iterator_->key(), last_ts, tmp_ng, tmp_txn);
         std::vector<uint64_t> ts_list;
         ts_list.push_back(first_ts);
         auto gap = (last_ts - first_ts) / worker_num_;
@@ -206,9 +218,9 @@ public:
         for (size_t i = 0; i < ts_list.size() - 1; i++)
         {
             rocksdb::ReadOptions read_options;
-            std::array<char, 16> start_key{};
+            std::array<char, 20> start_key{};
             // range start: current_ts, target_ng, txn number 0
-            Serialize(start_key, ts_list[i], 0);
+            Serialize(start_key, ts_list[i], target_ng, 0);
             keys_storage_.push_back(start_key);
             keys_.push_back(rocksdb::Slice(keys_storage_.back().data(),
                                            keys_storage_.back().size()));
@@ -216,9 +228,9 @@ public:
 
             if (i != ts_list.size() - 2)
             {
-                std::array<char, 16> end_key{};
+                std::array<char, 20> end_key{};
                 // range end: next_ts - 1, target_ng, txn number UINT64_MAX
-                Serialize(end_key, ts_list[i + 1] - 1, UINT64_MAX);
+                Serialize(end_key, ts_list[i + 1] - 1, target_ng, UINT64_MAX);
                 keys_storage_.push_back(end_key);
                 keys_.push_back(rocksdb::Slice(keys_storage_.back().data(),
                                                keys_storage_.back().size()));
@@ -272,13 +284,16 @@ public:
         {
             return *ddl_list_.at(ddl_idx_);
         }
+        uint32_t ng;
         uint64_t timestamp, tx_number;
-        Deserialize(rocksdb_iterator_->key(), timestamp, tx_number);
+        Deserialize(rocksdb_iterator_->key(), timestamp, ng, tx_number);
+
         rocksdb::Slice value = rocksdb_iterator_->value();
         item_.tx_number_ = tx_number;
         item_.timestamp_ = timestamp;
         item_.log_message_ = {value.data(), value.size()};
         item_.item_type_ = LogItemType::DataLog;
+        item_.cc_ng_ = ng;
         return item_;
     };
 
@@ -313,13 +328,16 @@ public:
 
     const Item &GetItem(size_t idx) override
     {
+        uint32_t ng;
         uint64_t timestamp, tx_number;
-        Deserialize(rocksdb_iterators_[idx]->key(), timestamp, tx_number);
+        Deserialize(rocksdb_iterators_[idx]->key(), timestamp, ng, tx_number);
+
         rocksdb::Slice value = rocksdb_iterators_[idx]->value();
         items_[idx].tx_number_ = tx_number;
         items_[idx].timestamp_ = timestamp;
         items_[idx].log_message_ = {value.data(), value.size()};
         items_[idx].item_type_ = LogItemType::DataLog;
+        items_[idx].cc_ng_ = ng;
         return items_[idx];
     };
 
@@ -350,11 +368,11 @@ private:
 #else
     rocksdb::DB *db_;
 #endif
-    std::array<char, 16> start_key_storage_;
+    std::array<char, 20> start_key_storage_;
     rocksdb::Slice start_key_;
     std::unique_ptr<rocksdb::Iterator> rocksdb_iterator_;
     Item item_;
-    std::vector<std::array<char, 16>> keys_storage_;
+    std::vector<std::array<char, 20>> keys_storage_;
     std::vector<rocksdb::Slice> keys_;
     std::vector<std::unique_ptr<rocksdb::Iterator>> rocksdb_iterators_;
     std::vector<Item> items_;
@@ -372,19 +390,22 @@ public:
 
     ~LogStateRocksDBImpl() override;
 
-    int AddLogItem(uint64_t tx_number,
+    int AddLogItem(uint32_t cc_ng_id,
+                   uint64_t tx_number,
                    uint64_t timestamp,
                    const std::string &log_message) override;
 
     int AddLogItemBatch(
-        const std::vector<std::tuple<uint64_t, uint64_t, std::string>>
-            &batch_logs);
+        const std::vector<std::tuple<uint32_t, uint64_t, uint64_t, std::string>>
+            &batch_logs) override;
 
     std::pair<bool, std::unique_ptr<ItemIterator>> GetLogReplayList(
-        uint64_t start_timestamp) override;
+        uint32_t node_group_id, uint64_t start_timestamp) override;
 
     std::pair<bool, Item::Pointer> SearchTxDataLog(
-        uint64_t tx_number, uint64_t lower_bound_ts = 0) override;
+        uint64_t tx_number,
+        uint32_t cc_ng_id,
+        uint64_t lower_bound_ts = 0) override;
 
     /**
      * Start will be called in starting LogState.
@@ -421,7 +442,8 @@ private:
 
     int DeleteRangeOp(uint64_t txn, uint64_t timestamp) override;
 
-    int PersistCkptAndMaxTxn(uint64_t ckpt_ts, uint32_t max_txn) override;
+    int PersistCkptAndMaxTxn(
+        const std::unordered_map<uint32_t, CcNgInfo> &ng_infos) override;
 
     void StopRocksDB();
 

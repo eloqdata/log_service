@@ -79,7 +79,8 @@ void OpenLogTaskWorker::WorkerThreadMain()
             task_cnt_.fetch_sub(count, std::memory_order_relaxed);
 
             // First pass: collect all data log writes from across tasks
-            std::vector<std::tuple<uint64_t, uint64_t, std::string>> batch_logs;
+            std::vector<std::tuple<uint32_t, uint64_t, uint64_t, std::string>>
+                batch_logs;
             // Keep track of which tasks have data logs to update their
             // responses later
             std::vector<std::pair<OpenLogServiceTask *, size_t>> data_log_tasks;
@@ -111,7 +112,8 @@ void OpenLogTaskWorker::WorkerThreadMain()
                          it != data_log.node_txn_logs().end();
                          ++it)
                     {
-                        batch_logs.emplace_back(txn, timestamp, it->second);
+                        batch_logs.emplace_back(
+                            it->first, txn, timestamp, it->second);
                     }
                 }
             }
@@ -154,7 +156,11 @@ void OpenLogTaskWorker::WorkerThreadMain()
                         // Update latest committed transaction number
                         uint32_t tx_ident =
                             req->write_log_request().txn_number() & 0xFFFFFFFF;
-                        log_state_->UpdateLatestCommittedTxnNumber(tx_ident);
+                        uint32_t high_half =
+                            req->write_log_request().txn_number() >> 32L;
+                        uint32_t ng_id = high_half >> 10;
+                        log_state_->UpdateLatestCommittedTxnNumber(ng_id,
+                                                                   tx_ident);
                         break;
                     }
                 }
@@ -240,7 +246,7 @@ void OpenLogTaskWorker::HandleWriteLog(const WriteLogRequest &req,
              it != data_log.node_txn_logs().end();
              ++it)
         {
-            err = log_state_->AddLogItem(txn, timestamp, it->second);
+            err = log_state_->AddLogItem(it->first, txn, timestamp, it->second);
             if (err != 0)
                 break;
         }
@@ -264,7 +270,9 @@ void OpenLogTaskWorker::HandleWriteLog(const WriteLogRequest &req,
     }
 
     uint32_t tx_ident = req.txn_number() & 0xFFFFFFFF;
-    log_state_->UpdateLatestCommittedTxnNumber(tx_ident);
+    uint32_t high_half = req.txn_number() >> 32L;
+    uint32_t ng_id = high_half >> 10;
+    log_state_->UpdateLatestCommittedTxnNumber(ng_id, tx_ident);
 
     if (err != 0)
     {
@@ -280,7 +288,7 @@ void OpenLogTaskWorker::HandleWriteLog(const WriteLogRequest &req,
 void OpenLogTaskWorker::HandleUpdateCkptTs(const UpdateCheckpointTsRequest &req,
                                            LogResponse *resp)
 {
-    log_state_->UpdateCkptTs(req.ckpt_timestamp());
+    log_state_->UpdateCkptTs(req.cc_node_group_id(), req.ckpt_timestamp());
     resp->set_response_status(
         LogResponse::ResponseStatus::LogResponse_ResponseStatus_Success);
 }
