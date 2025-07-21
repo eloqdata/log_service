@@ -215,9 +215,9 @@ public:
         return 0;
     }
 
-    bool UpsertSchemaOp(uint64_t tx_no,
-                        uint64_t commit_ts,
-                        const SchemaOpMessage &schema_op)
+    int UpsertSchemaOp(uint64_t tx_no,
+                       uint64_t commit_ts,
+                       const SchemaOpMessage &schema_op)
     {
         const SchemaOpMessage::Stage new_stage = schema_op.stage();
         if (new_stage == SchemaOpMessage_Stage_PrepareSchema)
@@ -229,12 +229,13 @@ public:
             {
                 LOG(INFO) << "duplicate prepare log detected, txn: " << tx_no
                           << ", ignore";
-                return true;
+                return 0;
             }
         }
-        if (PersistSchemaOp(tx_no, commit_ts, schema_op) != 0)
+        if (const auto rc = PersistSchemaOp(tx_no, commit_ts, schema_op); rc != 0)
         {
-            return false;
+            LOG(ERROR) << "PersistSchemaOp failed, rc: " << rc;
+            return 1;
         }
 
         std::unique_lock lk(log_state_mutex_);
@@ -246,7 +247,7 @@ public:
             auto catalog_it = tx_catalog_ops_.find(tx_no);
             if (catalog_it == tx_catalog_ops_.end())
             {
-                return true;
+                return 0;
             }
 
             // The schema operation has been logged. Only updates the stage.
@@ -314,21 +315,21 @@ public:
             }
             else
             {
-                return true;
+                return 0;
             }
         }
-        return true;
+        return 0;
     }
 
-    bool UpsertSchemaOpWithinDML(
+    int UpsertSchemaOpWithinDML(
         uint64_t tx_no,
         uint64_t commit_ts,
         const ::google::protobuf::RepeatedPtrField<SchemaOpMessage> &schemas_op)
     {
-        int rc = PersistSchemasOp(tx_no, commit_ts, schemas_op);
-        if (rc != 0)
+        if (const auto rc = PersistSchemasOp(tx_no, commit_ts, schemas_op); rc != 0)
         {
-            return false;
+            LOG(ERROR) << "PersistSchemasOp failed, rc: " << rc;
+            return 1;
         }
 
         // this func is called when on_apply processing WriteLogRequest, might
@@ -364,7 +365,7 @@ public:
                           << ", ignore";
             }
         }
-        return true;
+        return 0;
     }
 
     std::pair<bool, SplitRangeOpMessage_Stage> SearchTxSplitRangeOp(
@@ -384,14 +385,16 @@ public:
         }
     }
 
-    void UpdateSplitRangeOp(uint64_t tx_num,
-                            uint64_t commit_ts,
-                            const SplitRangeOpMessage &split_range_op_message)
+    int UpdateSplitRangeOp(uint64_t tx_num,
+                           uint64_t commit_ts,
+                           const SplitRangeOpMessage &split_range_op_message)
     {
-        int rc = PersistRangeOp(tx_num, commit_ts, split_range_op_message);
-        while (rc != 0)
+        if (const auto rc =
+                PersistRangeOp(tx_num, commit_ts, split_range_op_message);
+            rc != 0)
         {
-            rc = PersistRangeOp(tx_num, commit_ts, split_range_op_message);
+            LOG(ERROR) << "PersistRangeOp error: " << rc;
+            return 1;
         }
 
         std::unique_lock x_lk(log_state_mutex_);
@@ -406,7 +409,7 @@ public:
             {
                 LOG(INFO) << "duplicate split range prepare log detected, txn: "
                           << tx_num << ", ignore";
-                return;
+                return 0;
             }
         }
         else
@@ -415,7 +418,7 @@ public:
 
             if (split_range_op_it == tx_split_range_ops_.end())
             {
-                return;
+                return 0;
             }
 
             SplitRangeOpMessage &split_range_msg =
@@ -468,9 +471,10 @@ public:
                 LOG(INFO) << "duplicate split range log detected, txn: "
                           << tx_num << ", stage: " << int(new_stage)
                           << ", ignore";
-                return;
+                return 0;
             }
         }
+        return 0;
     }
 
     void CleanSplitRangeOps(uint64_t txn)
@@ -485,7 +489,9 @@ public:
 
     uint32_t LatestCommittedTxnNumber() const
     {
-        return cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
+        return std::max(
+            cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed),
+            latest_meta_tx_number_);
     }
 
     void UpdateLatestCommittedTxnNumber(uint32_t tx_ident)
@@ -511,6 +517,7 @@ public:
             int rc = PersistCkptAndMaxTxn(timestamp, max_txn);
             while (rc != 0)
             {
+                LOG(ERROR) << "PersistCkptAndMaxTxn failed, rc: " << rc;
                 rc = PersistCkptAndMaxTxn(timestamp, max_txn);
             }
 
@@ -895,5 +902,11 @@ protected:
         ClusterScaleOpMessage cluster_scale_op_message_;
         uint64_t commit_ts_;
     };
+
+    /**
+     * Used for avoiding reusing tx number of tx which has not been replayed
+     */
+    uint64_t max_meta_commit_ts_{0};
+    uint32_t latest_meta_tx_number_{0};
 };
 }  // namespace txlog

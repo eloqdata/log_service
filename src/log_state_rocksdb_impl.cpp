@@ -479,6 +479,11 @@ int LogStateRocksDBImpl::Start()
                     }
                 }
 
+                if (timestamp > max_meta_commit_ts_)
+                {
+                    max_meta_commit_ts_ = timestamp;
+                    latest_meta_tx_number_ = static_cast<uint32_t>(tx_number & 0xFFFFFFFFu);
+                }
                 // Move to the next key
                 it->Next();
             }
@@ -833,6 +838,8 @@ int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
                 }
                 else
                 {
+                    LOG(INFO) << "stored stage: " << schema_op_msg_stored.stage()
+                    << ", new stage: " << schema_op_msg.stage();
                     return 1;
                 }
             }
