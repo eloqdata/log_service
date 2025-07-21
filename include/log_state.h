@@ -215,55 +215,102 @@ public:
         return 0;
     }
 
-    int UpsertSchemaOp(uint64_t tx_no,
+    int UpsertSchemaOp(const uint64_t txn,
                        uint64_t commit_ts,
                        const SchemaOpMessage &schema_op)
     {
+        std::unique_lock lk(log_state_mutex_);
         const SchemaOpMessage::Stage new_stage = schema_op.stage();
         if (new_stage == SchemaOpMessage_Stage_PrepareSchema)
         {
-            std::unique_lock lk(log_state_mutex_);
-            if (tx_catalog_ops_.find(tx_no) != tx_catalog_ops_.end())
+            if (tx_catalog_ops_.find(txn) != tx_catalog_ops_.end())
             {
-                LOG(INFO) << "duplicate prepare log detected, txn: " << tx_no
+                LOG(INFO) << "duplicate prepare log detected, txn: " << txn
                           << ", ignore";
                 return 0;
             }
         }
-        if (const auto rc = PersistSchemaOp(tx_no, commit_ts, schema_op);
-            rc != 0)
-        {
-            LOG(ERROR) << "PersistSchemaOp failed, rc: " << rc;
-            return 1;
-        }
 
-        std::unique_lock lk(log_state_mutex_);
         assert(!schema_op.table_name_str().empty() &&
                schema_op.table_type() == CcTableType::Primary);
 
         if (new_stage == SchemaOpMessage_Stage_PrepareSchema)
         {
-            auto [it, success] =
-                tx_catalog_ops_.try_emplace(tx_no, schema_op, commit_ts);
-            if (!success)
+            std::string schemas_op_str;
+            assert(tx_catalog_ops_.find(txn) == tx_catalog_ops_.end());
+            uint16_t cnt = 1;
+            schemas_op_str.append(reinterpret_cast<char *>(&cnt), sizeof(cnt));
+            const auto str = schema_op.SerializeAsString();
+            uint32_t len = str.size();
+            schemas_op_str.append(reinterpret_cast<char *>(&len), sizeof(len));
+            schemas_op_str += str;
+            if (const auto rc = PersistSchemaOp(txn, commit_ts, schemas_op_str);
+                rc != 0)
             {
-                LOG(INFO) << "duplicate prepare log detected, txn: " << tx_no
-                          << ", ignore";
+                LOG(ERROR) << "PersistSchemaOp failed, rc: " << rc;
                 return 1;
             }
+
+            tx_catalog_ops_.emplace(txn, CatalogOp{schema_op, commit_ts});
         }
         else
         {
-            auto catalog_it = tx_catalog_ops_.find(tx_no);
+            const auto catalog_it = tx_catalog_ops_.find(txn);
             if (catalog_it == tx_catalog_ops_.end())
             {
                 return 0;
             }
 
+            commit_ts = catalog_it->second.CommitTs();
+
             // The schema operation has been logged. Only updates the stage.
             CatalogOp &catalog_op = catalog_it->second;
             if (new_stage > catalog_op.SchemasOpStage())
             {
+                std::string schemas_op_str;
+
+                const auto schema_op_msgs = catalog_it->second.SchemaOpMsgs();
+                auto schema_cnt = static_cast<uint16_t>(
+                    catalog_it->second.SchemaOpMsgCount());
+                schemas_op_str.append(reinterpret_cast<char *>(&schema_cnt),
+                                      sizeof(schema_cnt));
+                for (uint64_t idx = 0; idx < schema_cnt; ++idx)
+                {
+                    std::string str;
+                    if (const auto &schema_op_msg_stored = schema_op_msgs[idx];
+                        schema_op_msg_stored.table_name_str() ==
+                            schema_op.table_name_str() &&
+                        schema_op_msg_stored.table_type() ==
+                            schema_op.table_type())
+                    {
+                        if (schema_op_msg_stored.stage() < schema_op.stage())
+                        {
+                            str = schema_op.SerializeAsString();
+                        }
+                        else
+                        {
+                            LOG(INFO) << "stored stage: "
+                                      << schema_op_msg_stored.stage()
+                                      << ", new stage: " << schema_op.stage();
+                            return 1;
+                        }
+                    }
+                    else
+                    {
+                        str = schema_op_msg_stored.SerializeAsString();
+                    }
+                    uint32_t len = str.size();
+                    schemas_op_str.append(reinterpret_cast<char *>(&len),
+                                          sizeof(len));
+                    schemas_op_str += str;
+                }
+                if (const auto rc =
+                        PersistSchemaOp(txn, commit_ts, schemas_op_str);
+                    rc != 0)
+                {
+                    LOG(ERROR) << "PersistSchemaOp failed, rc: " << rc;
+                    return 1;
+                }
                 // For the schema operation that need to deal with the data,
                 // such as ADD INDEX.
                 if (new_stage == SchemaOpMessage_Stage_PrepareData)
@@ -674,7 +721,7 @@ protected:
 
     virtual int PersistSchemaOp(uint64_t txn,
                                 uint64_t timestamp,
-                                const SchemaOpMessage &schema_op) = 0;
+                                const std::string &schemas_op_str) = 0;
 
     virtual int PersistSchemasOp(
         uint64_t txn,

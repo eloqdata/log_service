@@ -405,7 +405,7 @@ public:
 private:
     int PersistSchemaOp(uint64_t txn,
                         uint64_t timestamp,
-                        const SchemaOpMessage &schema_op) override;
+                        const std::string &value) override;
 
     int PersistSchemasOp(
         uint64_t txn,
