@@ -63,6 +63,8 @@ void OpenLogServiceImpl::ReplayLog(
     brpc::ClosureGuard done_guard(done);
 
     const ReplayLogRequest &req = request->replay_log_request();
+    const uint32_t cc_ng_id = req.cc_node_group_id();
+
     const std::string &cc_node_ip = req.source_ip();
     uint16_t cc_node_port = req.source_port();
 
@@ -97,6 +99,8 @@ void OpenLogServiceImpl::ReplayLog(
     // transferring the leadership to a new cc node. The replacement will
     // interrupt and de-allocate the old shipping agent.
     log_replay_worker_ = std::make_unique<LogShippingAgent>(log_group_id_,
+                                                            cc_ng_id,
+                                                            DEFAULT_CC_NG_TERM,
                                                             cc_node_ip,
                                                             cc_node_port,
                                                             std::move(iterator),
@@ -134,6 +138,8 @@ void OpenLogServiceImpl::RecoverTx(
                                     RecoverTxResponse_TxStatus_RecoverError);
         return;
     }
+    uint32_t participant_cc_ng_id = request->cc_node_group_id();
+    int64_t dest_node_term = DEFAULT_CC_NG_TERM;
 
     auto [success, record] = log_state_->SearchTxDataLog(
         request->lock_tx_number(), request->write_lock_ts());
@@ -177,6 +183,8 @@ void OpenLogServiceImpl::RecoverTx(
         {
             log_replay_worker_ = std::make_unique<LogShippingAgent>(
                 log_group_id_,
+                participant_cc_ng_id,
+                dest_node_term,
                 request->source_ip(),
                 request->source_port(),
                 std::unique_ptr<ItemIterator>{},
