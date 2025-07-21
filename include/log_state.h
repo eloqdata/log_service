@@ -640,6 +640,11 @@ protected:
             const char *ptr = reinterpret_cast<const char *>(&tabname_len);
             split_range_op_str.append(ptr, sizeof(uint8_t));
             split_range_op_str.append(table_name.data(), tabname_len);
+            auto table_engine =
+                split_range_op.split_range_op_message_.table_engine();
+            const char *table_engine_ptr =
+                reinterpret_cast<const char *>(&table_engine);
+            split_range_op_str.append(table_engine_ptr, sizeof(uint8_t));
             // then, add split range op
             split_range_op.split_range_op_message_.AppendToString(
                 &split_range_op_str);
