@@ -282,7 +282,12 @@ public:
                     {
                         if (schema_op_msg_stored.stage() < schema_op.stage())
                         {
-                            str = schema_op.SerializeAsString();
+                            // use previous schema op, update the stage and
+                            // serialize, in case the new message does not
+                            // contain enough information.
+                            auto schema_op_msg_copy = schema_op_msgs[idx];
+                            schema_op_msg_copy.set_stage(schema_op.stage());
+                            str = schema_op_msg_copy.SerializeAsString();
                         }
                         else
                         {
@@ -544,9 +549,12 @@ public:
 
     uint32_t LatestCommittedTxnNumber() const
     {
-        return std::max(
-            cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed),
-            latest_meta_tx_number_);
+        auto cc_ng_info_latest_txn_no =
+            cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
+        return cc_ng_info_latest_txn_no - latest_meta_tx_number_ <
+                       UINT32_MAX >> 1
+                   ? cc_ng_info_latest_txn_no
+                   : latest_meta_tx_number_;
     }
 
     void UpdateLatestCommittedTxnNumber(uint32_t tx_ident)
