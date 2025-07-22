@@ -449,60 +449,58 @@ public:
                            uint64_t commit_ts,
                            const SplitRangeOpMessage &split_range_op_message)
     {
-        if (const auto rc =
-                PersistRangeOp(tx_num, commit_ts, split_range_op_message);
-            rc != 0)
-        {
-            LOG(ERROR) << "PersistRangeOp error: " << rc;
-            return 1;
-        }
-
         std::unique_lock x_lk(log_state_mutex_);
 
         SplitRangeOpMessage::Stage new_stage = split_range_op_message.stage();
         // only insert new entry at prepare stage
         if (new_stage == SplitRangeOpMessage_Stage_PrepareSplit)
         {
-            auto [it, success] = tx_split_range_ops_.try_emplace(
-                tx_num, split_range_op_message, commit_ts);
-            if (!success)
+            if (tx_split_range_ops_.find(tx_num) != tx_split_range_ops_.end())
             {
                 LOG(INFO) << "duplicate split range prepare log detected, txn: "
                           << tx_num << ", ignore";
                 return 0;
             }
+            const std::string range_op_str =
+                split_range_op_message.SerializeAsString();
+            if (const auto rc = PersistRangeOp(tx_num, commit_ts, range_op_str);
+                rc != 0)
+            {
+                LOG(ERROR) << "PersistRangeOp failed, rc: " << rc;
+                return 1;
+            }
+            tx_split_range_ops_.emplace(
+                tx_num, SplitRangeOp{split_range_op_message, commit_ts});
         }
         else
         {
-            auto split_range_op_it = tx_split_range_ops_.find(tx_num);
-
+            const auto split_range_op_it = tx_split_range_ops_.find(tx_num);
             if (split_range_op_it == tx_split_range_ops_.end())
             {
                 return 0;
             }
+            commit_ts = split_range_op_it->second.commit_ts_;
 
             SplitRangeOpMessage &split_range_msg =
                 split_range_op_it->second.split_range_op_message_;
             if (new_stage > split_range_msg.stage())
             {
+                SplitRangeOpMessage range_op_message_copy;
                 if (new_stage == SplitRangeOpMessage_Stage_CommitSplit)
                 {
-                    // slice specs are just written in commit stage log.
-                    split_range_msg.clear_slice_keys();
-                    split_range_msg.clear_slice_sizes();
-
+                    range_op_message_copy = split_range_msg;
                     assert(split_range_op_message.slice_keys_size() + 1 ==
                            split_range_op_message.slice_sizes_size());
                     int idx = 0;
                     for (; idx < split_range_op_message.slice_keys_size();
                          idx++)
                     {
-                        split_range_msg.add_slice_keys(
+                        range_op_message_copy.add_slice_keys(
                             split_range_op_message.slice_keys(idx));
-                        split_range_msg.add_slice_sizes(
+                        range_op_message_copy.add_slice_sizes(
                             split_range_op_message.slice_sizes(idx));
                     }
-                    split_range_msg.add_slice_sizes(
+                    range_op_message_copy.add_slice_sizes(
                         split_range_op_message.slice_sizes(idx));
                 }
                 else
@@ -521,10 +519,20 @@ public:
                     // Free the memory used by split_range_msg by overriding
                     // it as split_range_msg.Clear() won't free the memory
                     // used by message.
-                    split_range_op_it->second.split_range_op_message_ =
-                        SplitRangeOpMessage();
+                    range_op_message_copy = SplitRangeOpMessage();
                 }
-                split_range_msg.set_stage(new_stage);
+                range_op_message_copy.set_stage(new_stage);
+                const std::string range_op_str =
+                    range_op_message_copy.SerializeAsString();
+                if (const auto rc =
+                        PersistRangeOp(tx_num, commit_ts, range_op_str);
+                    rc != 0)
+                {
+                    LOG(ERROR) << "PersistRangeOp failed, rc: " << rc;
+                    return 1;
+                }
+                split_range_op_it->second.split_range_op_message_ =
+                    range_op_message_copy;
             }
             else
             {
@@ -640,14 +648,18 @@ protected:
             const char *ptr = reinterpret_cast<const char *>(&tabname_len);
             split_range_op_str.append(ptr, sizeof(uint8_t));
             split_range_op_str.append(table_name.data(), tabname_len);
+            LOG(INFO) << "table_name:" << table_name;
             auto table_engine =
                 split_range_op.split_range_op_message_.table_engine();
             const char *table_engine_ptr =
                 reinterpret_cast<const char *>(&table_engine);
             split_range_op_str.append(table_engine_ptr, sizeof(uint8_t));
+            LOG(INFO) << "start from " << split_range_op_str.size();
             // then, add split range op
             split_range_op.split_range_op_message_.AppendToString(
                 &split_range_op_str);
+            LOG(INFO) << "split_range_op_str length: "
+                      << split_range_op_str.length();
 
             res.emplace_back(
                 std::make_shared<Item>(txn,
@@ -726,7 +738,7 @@ protected:
 
     virtual int PersistSchemaOp(uint64_t txn,
                                 uint64_t timestamp,
-                                const std::string &schemas_op_str) = 0;
+                                const std::string &schema_op_str) = 0;
 
     virtual int PersistSchemasOp(
         uint64_t txn,
@@ -738,7 +750,7 @@ protected:
 
     virtual int PersistRangeOp(uint64_t txn,
                                uint64_t timestamp,
-                               const SplitRangeOpMessage &range_op) = 0;
+                               const std::string &range_op_str) = 0;
 
     virtual int DeleteRangeOp(uint64_t txn, uint64_t timestamp) = 0;
 

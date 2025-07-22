@@ -802,7 +802,7 @@ void LogStateRocksDBImpl::PurgingSstFiles()
 
 int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
                                          uint64_t timestamp,
-                                         const std::string &schemas_op_str)
+                                         const std::string &schema_op_str)
 {
     std::array<char, 17> key{};
     rocksdb::ReadOptions read_options;
@@ -811,7 +811,7 @@ int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
     const rocksdb::Status rc = db_->Put(write_option_,
                                         meta_handle_,
                                         rocksdb::Slice(key.data(), key.size()),
-                                        schemas_op_str);
+                                        schema_op_str);
     return rc.ok() ? 0 : rc.code();
 }
 
@@ -857,34 +857,16 @@ int LogStateRocksDBImpl::DeleteSchemaOp(uint64_t txn, uint64_t timestamp)
 
 int LogStateRocksDBImpl::PersistRangeOp(uint64_t txn,
                                         uint64_t timestamp,
-                                        const SplitRangeOpMessage &range_op_msg)
+                                        const std::string &range_op_str)
 {
-    std::string range_op_str;
-    SplitRangeOpMessage_Stage new_stage = range_op_msg.stage();
-    if (new_stage >
-        SplitRangeOpMessage_Stage::SplitRangeOpMessage_Stage_PrepareSplit)
-    {
-        auto range_it = tx_split_range_ops_.find(txn);
-        assert(range_it != tx_split_range_ops_.end());
-        SplitRangeOpMessage &current_range_op_msg =
-            range_it->second.split_range_op_message_;
-        current_range_op_msg.set_stage(new_stage);
-        // only overwrite satge
-        range_op_str = current_range_op_msg.SerializeAsString();
-    }
-    else
-    {
-        range_op_str = range_op_msg.SerializeAsString();
-    }
-    // std::string op_str = range_op.SerializeAsString();
 
     std::array<char, 17> key{};
-    Serialize(key, timestamp, txn, (uint8_t) LogState::MetaOp::RangeOp);
+    Serialize(key, timestamp, txn, static_cast<uint8_t>(MetaOp::RangeOp));
 
-    rocksdb::Status rc = db_->Put(write_option_,
-                                  meta_handle_,
-                                  rocksdb::Slice(key.data(), key.size()),
-                                  range_op_str);
+    const rocksdb::Status rc = db_->Put(write_option_,
+                                        meta_handle_,
+                                        rocksdb::Slice(key.data(), key.size()),
+                                        range_op_str);
 
     return rc.ok() ? 0 : rc.code();
 }
