@@ -219,8 +219,6 @@ public:
                        uint64_t commit_ts,
                        const SchemaOpMessage &schema_op)
     {
-        LOG(INFO) << "UpsertSchemaOp txn " << txn << " commit_ts " << commit_ts
-                  << " stage " << schema_op.stage();
         std::unique_lock lk(log_state_mutex_);
         const SchemaOpMessage::Stage new_stage = schema_op.stage();
 
@@ -493,22 +491,22 @@ public:
                 split_range_op_it->second.split_range_op_message_;
             if (new_stage > split_range_msg.stage())
             {
-                SplitRangeOpMessage range_op_message_copy;
+                SplitRangeOpMessage split_range_msg_copy;
                 if (new_stage == SplitRangeOpMessage_Stage_CommitSplit)
                 {
-                    range_op_message_copy = split_range_msg;
+                    split_range_msg_copy = split_range_msg;
                     assert(split_range_op_message.slice_keys_size() + 1 ==
                            split_range_op_message.slice_sizes_size());
                     int idx = 0;
                     for (; idx < split_range_op_message.slice_keys_size();
                          idx++)
                     {
-                        range_op_message_copy.add_slice_keys(
+                        split_range_msg_copy.add_slice_keys(
                             split_range_op_message.slice_keys(idx));
-                        range_op_message_copy.add_slice_sizes(
+                        split_range_msg_copy.add_slice_sizes(
                             split_range_op_message.slice_sizes(idx));
                     }
-                    range_op_message_copy.add_slice_sizes(
+                    split_range_msg_copy.add_slice_sizes(
                         split_range_op_message.slice_sizes(idx));
                 }
                 else
@@ -527,11 +525,11 @@ public:
                     // Free the memory used by split_range_msg by overriding
                     // it as split_range_msg.Clear() won't free the memory
                     // used by message.
-                    range_op_message_copy = SplitRangeOpMessage();
+                    split_range_msg_copy = SplitRangeOpMessage();
                 }
-                range_op_message_copy.set_stage(new_stage);
+                split_range_msg_copy.set_stage(new_stage);
                 const std::string range_op_str =
-                    range_op_message_copy.SerializeAsString();
+                    split_range_msg_copy.SerializeAsString();
                 if (const auto rc =
                         PersistRangeOp(tx_num, commit_ts, range_op_str);
                     rc != 0)
@@ -540,7 +538,7 @@ public:
                     return 1;
                 }
                 split_range_op_it->second.split_range_op_message_ =
-                    range_op_message_copy;
+                    split_range_msg_copy;
             }
             else
             {
@@ -564,7 +562,7 @@ public:
 
     uint32_t LatestCommittedTxnNumber() const
     {
-        return cc_ng_info_.latest_txn_no_;
+        return cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
     }
 
     void UpdateLatestCommittedTxnNumber(uint32_t tx_ident)
@@ -654,18 +652,14 @@ protected:
             const char *ptr = reinterpret_cast<const char *>(&tabname_len);
             split_range_op_str.append(ptr, sizeof(uint8_t));
             split_range_op_str.append(table_name.data(), tabname_len);
-            LOG(INFO) << "table_name:" << table_name;
             auto table_engine =
                 split_range_op.split_range_op_message_.table_engine();
             const char *table_engine_ptr =
                 reinterpret_cast<const char *>(&table_engine);
             split_range_op_str.append(table_engine_ptr, sizeof(uint8_t));
-            LOG(INFO) << "start from " << split_range_op_str.size();
             // then, add split range op
             split_range_op.split_range_op_message_.AppendToString(
                 &split_range_op_str);
-            LOG(INFO) << "split_range_op_str length: "
-                      << split_range_op_str.length();
 
             res.emplace_back(
                 std::make_shared<Item>(txn,

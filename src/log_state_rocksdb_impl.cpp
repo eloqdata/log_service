@@ -385,13 +385,13 @@ int LogStateRocksDBImpl::Start()
 
             uint64_t timestamp;
             uint64_t tx_number;
-            ::google::protobuf::RepeatedPtrField<SchemaOpMessage>
-                new_schemas_op_msg;
             SplitRangeOpMessage_Stage new_range_stage;
             SplitRangeOpMessage new_range_op_msg;
 
             while (it->Valid())
             {
+                ::google::protobuf::RepeatedPtrField<SchemaOpMessage>
+                    new_schemas_op_msg;
                 // Get the key and value as rocksdb::Slice
                 rocksdb::Slice key_slice = it->key();
                 rocksdb::Slice value_slice = it->value();
@@ -484,6 +484,7 @@ int LogStateRocksDBImpl::Start()
 
                 uint32_t latest_txn_no =
                     cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
+                // assuming the range of transaction number within UINT32_MAX/2
                 if (static_cast<int32_t>(
                         static_cast<uint32_t>(tx_number & 0xFFFFFFFF) -
                         latest_txn_no) > 0)
@@ -800,6 +801,7 @@ void LogStateRocksDBImpl::PurgingSstFiles()
     }
 }
 
+
 int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
                                          uint64_t timestamp,
                                          const std::string &schema_op_str)
@@ -859,7 +861,6 @@ int LogStateRocksDBImpl::PersistRangeOp(uint64_t txn,
                                         uint64_t timestamp,
                                         const std::string &range_op_str)
 {
-
     std::array<char, 17> key{};
     Serialize(key, timestamp, txn, static_cast<uint8_t>(MetaOp::RangeOp));
 
