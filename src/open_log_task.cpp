@@ -219,6 +219,7 @@ void OpenLogTaskWorker::HandleWriteLog(const WriteLogRequest &req,
 {
     const uint64_t timestamp = req.commit_timestamp();
     uint64_t txn = req.txn_number();
+    LOG(INFO) << "HandleWriteLog txn " << txn << " timestamp " << timestamp;
     int err = 0;
 
     const LogContentMessage &log_content = req.log_content();

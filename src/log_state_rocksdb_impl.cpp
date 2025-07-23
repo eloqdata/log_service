@@ -821,7 +821,7 @@ int LogStateRocksDBImpl::PersistSchemasOp(
     const ::google::protobuf::RepeatedPtrField<SchemaOpMessage> &schemas_op)
 {
     std::array<char, 17> key{};
-    Serialize(key, timestamp, txn, (uint8_t) LogState::MetaOp::SchemaOp);
+    Serialize(key, timestamp, txn, static_cast<uint8_t>(MetaOp::SchemaOp));
 
     std::string schemas_op_str;
 
@@ -847,7 +847,7 @@ int LogStateRocksDBImpl::PersistSchemasOp(
 int LogStateRocksDBImpl::DeleteSchemaOp(uint64_t txn, uint64_t timestamp)
 {
     std::array<char, 17> key{};
-    Serialize(key, timestamp, txn, (uint8_t) LogState::MetaOp::SchemaOp);
+    Serialize(key, timestamp, txn, static_cast<uint8_t>(MetaOp::SchemaOp));
 
     rocksdb::Status rc = db_->Delete(
         write_option_, meta_handle_, rocksdb::Slice(key.data(), key.size()));

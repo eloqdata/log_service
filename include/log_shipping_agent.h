@@ -408,6 +408,9 @@ private:
                 schema_msg->clear_schema_op_blob();
                 schema_msg->set_schema_op_blob(item.log_message_);
                 schema_msg->set_txn(item.tx_number_);
+                LOG(INFO) << "write to stream schema_msg, commit_ts "
+                          << item.timestamp_ << ", tx_number "
+                          << item.tx_number_;
             }
             else if (item.item_type_ == LogItemType::SplitRangeLog)
             {

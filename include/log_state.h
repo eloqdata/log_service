@@ -219,6 +219,8 @@ public:
                        uint64_t commit_ts,
                        const SchemaOpMessage &schema_op)
     {
+        LOG(INFO) << "UpsertSchemaOp txn " << txn << " commit_ts " << commit_ts
+                  << " stage " << schema_op.stage();
         std::unique_lock lk(log_state_mutex_);
         const SchemaOpMessage::Stage new_stage = schema_op.stage();
 
@@ -271,30 +273,32 @@ public:
                     catalog_it->second.SchemaOpMsgCount());
                 schemas_op_str.append(reinterpret_cast<char *>(&schema_cnt),
                                       sizeof(schema_cnt));
+                SchemaOpMessage *schema_op_msg_to_update_ptr = nullptr;
                 for (uint64_t idx = 0; idx < schema_cnt; ++idx)
                 {
                     std::string str;
-                    if (const auto &schema_op_msg_stored = schema_op_msgs[idx];
+                    if (auto &schema_op_msg_stored = schema_op_msgs[idx];
                         schema_op_msg_stored.table_name_str() ==
                             schema_op.table_name_str() &&
                         schema_op_msg_stored.table_type() ==
                             schema_op.table_type())
                     {
-                        if (schema_op_msg_stored.stage() < schema_op.stage())
+                        if (schema_op_msg_stored.stage() < new_stage)
                         {
                             // use previous schema op, update the stage and
                             // serialize, in case the new message does not
                             // contain enough information.
                             auto schema_op_msg_copy = schema_op_msgs[idx];
-                            schema_op_msg_copy.set_stage(schema_op.stage());
+                            schema_op_msg_copy.set_stage(new_stage);
                             str = schema_op_msg_copy.SerializeAsString();
+                            schema_op_msg_to_update_ptr = &schema_op_msg_stored;
                         }
                         else
                         {
                             LOG(INFO) << "stored stage: "
                                       << schema_op_msg_stored.stage()
-                                      << ", new stage: " << schema_op.stage();
-                            return 1;
+                                      << ", new stage: " << new_stage;
+                            return 0;
                         }
                     }
                     else
@@ -312,6 +316,10 @@ public:
                 {
                     LOG(ERROR) << "PersistSchemaOp failed, rc: " << rc;
                     return 1;
+                }
+                if (schema_op_msg_to_update_ptr != nullptr)
+                {
+                    schema_op_msg_to_update_ptr->set_stage(new_stage);
                 }
                 // For the schema operation that need to deal with the data,
                 // such as ADD INDEX.
@@ -537,8 +545,7 @@ public:
             else
             {
                 LOG(INFO) << "duplicate split range log detected, txn: "
-                          << tx_num << ", stage: " << int(new_stage)
-                          << ", ignore";
+                          << tx_num << ", stage: " << new_stage << ", ignore";
                 return 0;
             }
         }
@@ -616,8 +623,7 @@ protected:
             for (uint16_t idx = 0; idx < catalog_op.SchemaOpMsgCount(); ++idx)
             {
                 const SchemaOpMessage &msg = catalog_op.SchemaOpMsgs()[idx];
-                if (msg.stage() !=
-                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_CleanSchema)
+                if (msg.stage() != SchemaOpMessage_Stage_CleanSchema)
                 {
                     std::string schema_op_str;
                     msg.SerializeToString(&schema_op_str);
