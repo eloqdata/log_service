@@ -495,6 +495,8 @@ public:
                 if (new_stage == SplitRangeOpMessage_Stage_CommitSplit)
                 {
                     split_range_msg_copy = split_range_msg;
+                    split_range_msg_copy.clear_slice_keys();
+                    split_range_msg_copy.clear_slice_sizes();
                     assert(split_range_op_message.slice_keys_size() + 1 ==
                            split_range_op_message.slice_sizes_size());
                     int idx = 0;
