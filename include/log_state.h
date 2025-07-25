@@ -215,50 +215,113 @@ public:
         return 0;
     }
 
-    void UpsertSchemaOp(uint64_t tx_no,
-                        uint64_t commit_ts,
-                        const SchemaOpMessage &schema_op)
+    int UpsertSchemaOp(const uint64_t txn,
+                       uint64_t commit_ts,
+                       const SchemaOpMessage &schema_op)
     {
-        int rc = PersistSchemaOp(tx_no, commit_ts, schema_op);
-        while (rc != 0)
-        {
-            rc = PersistSchemaOp(tx_no, commit_ts, schema_op);
-        }
-
         std::unique_lock lk(log_state_mutex_);
+        const SchemaOpMessage::Stage new_stage = schema_op.stage();
+
         assert(!schema_op.table_name_str().empty() &&
                schema_op.table_type() == CcTableType::Primary);
 
-        SchemaOpMessage::Stage new_stage = schema_op.stage();
-        // only insert new entry at prepare stage
-        if (new_stage ==
-            SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareSchema)
+        if (new_stage == SchemaOpMessage_Stage_PrepareSchema)
         {
-            auto [it, success] =
-                tx_catalog_ops_.try_emplace(tx_no, schema_op, commit_ts);
-            if (!success)
+            if (tx_catalog_ops_.find(txn) != tx_catalog_ops_.end())
             {
-                LOG(INFO) << "duplicate prepare log detected, txn: " << tx_no
+                LOG(INFO) << "duplicate prepare log detected, txn: " << txn
                           << ", ignore";
-                return;
+                return 0;
             }
+            std::string schemas_op_str;
+            assert(tx_catalog_ops_.find(txn) == tx_catalog_ops_.end());
+            uint16_t cnt = 1;
+            schemas_op_str.append(reinterpret_cast<char *>(&cnt), sizeof(cnt));
+            const auto str = schema_op.SerializeAsString();
+            uint32_t len = str.size();
+            schemas_op_str.append(reinterpret_cast<char *>(&len), sizeof(len));
+            schemas_op_str += str;
+            if (const auto rc = PersistSchemaOp(txn, commit_ts, schemas_op_str);
+                rc != 0)
+            {
+                LOG(ERROR) << "PersistSchemaOp failed, rc: " << rc;
+                return 1;
+            }
+
+            tx_catalog_ops_.emplace(txn, CatalogOp{schema_op, commit_ts});
         }
         else
         {
-            auto catalog_it = tx_catalog_ops_.find(tx_no);
+            const auto catalog_it = tx_catalog_ops_.find(txn);
             if (catalog_it == tx_catalog_ops_.end())
             {
-                return;
+                return 0;
             }
+
+            commit_ts = catalog_it->second.CommitTs();
 
             // The schema operation has been logged. Only updates the stage.
             CatalogOp &catalog_op = catalog_it->second;
             if (new_stage > catalog_op.SchemasOpStage())
             {
+                std::string schemas_op_str;
+
+                const auto schema_op_msgs = catalog_it->second.SchemaOpMsgs();
+                auto schema_cnt = static_cast<uint16_t>(
+                    catalog_it->second.SchemaOpMsgCount());
+                schemas_op_str.append(reinterpret_cast<char *>(&schema_cnt),
+                                      sizeof(schema_cnt));
+                SchemaOpMessage *schema_op_msg_to_update_ptr = nullptr;
+                for (uint64_t idx = 0; idx < schema_cnt; ++idx)
+                {
+                    std::string str;
+                    if (auto &schema_op_msg_stored = schema_op_msgs[idx];
+                        schema_op_msg_stored.table_name_str() ==
+                            schema_op.table_name_str() &&
+                        schema_op_msg_stored.table_type() ==
+                            schema_op.table_type())
+                    {
+                        if (schema_op_msg_stored.stage() < new_stage)
+                        {
+                            // use previous schema op, update the stage and
+                            // serialize, in case the new message does not
+                            // contain enough information.
+                            auto schema_op_msg_copy = schema_op_msgs[idx];
+                            schema_op_msg_copy.set_stage(new_stage);
+                            str = schema_op_msg_copy.SerializeAsString();
+                            schema_op_msg_to_update_ptr = &schema_op_msg_stored;
+                        }
+                        else
+                        {
+                            LOG(INFO) << "stored stage: "
+                                      << schema_op_msg_stored.stage()
+                                      << ", new stage: " << new_stage;
+                            return 0;
+                        }
+                    }
+                    else
+                    {
+                        str = schema_op_msg_stored.SerializeAsString();
+                    }
+                    uint32_t len = str.size();
+                    schemas_op_str.append(reinterpret_cast<char *>(&len),
+                                          sizeof(len));
+                    schemas_op_str += str;
+                }
+                if (const auto rc =
+                        PersistSchemaOp(txn, commit_ts, schemas_op_str);
+                    rc != 0)
+                {
+                    LOG(ERROR) << "PersistSchemaOp failed, rc: " << rc;
+                    return 1;
+                }
+                if (schema_op_msg_to_update_ptr != nullptr)
+                {
+                    schema_op_msg_to_update_ptr->set_stage(new_stage);
+                }
                 // For the schema operation that need to deal with the data,
                 // such as ADD INDEX.
-                if (new_stage ==
-                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData)
+                if (new_stage == SchemaOpMessage_Stage_PrepareData)
                 {
                     SchemaOpMessage &schema_op_msg = *catalog_op.GetSchemaOpMsg(
                         schema_op.table_name_str(), schema_op.table_type());
@@ -272,8 +335,7 @@ public:
                 // Encounter flush error after write prepare log. Need to
                 // set commit_ts_ to 0(previously set by prepare_log)
                 if (commit_ts == 0 &&
-                    new_stage == SchemaOpMessage_Stage::
-                                     SchemaOpMessage_Stage_CommitSchema)
+                    new_stage == SchemaOpMessage_Stage_CommitSchema)
                 {
                     catalog_op.SetCommitTs(0);
                 }
@@ -284,8 +346,7 @@ public:
                 // stage (prepare log) yet come to log service after clean
                 // log finished. The schema log will be erased when all node
                 // group's ckpt_ts are one hour greater than its commit ts.
-                if (new_stage ==
-                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_CleanSchema)
+                if (new_stage == SchemaOpMessage_Stage_CleanSchema)
                 {
                     // For pure DDL transactions, CatalogOp contains only
                     // one catalog image. For logical alter table DDL inside
@@ -306,8 +367,7 @@ public:
             }
             else if (new_stage == catalog_op.SchemasOpStage())
             {
-                if (new_stage ==
-                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData)
+                if (new_stage == SchemaOpMessage_Stage_PrepareData)
                 {
                     SchemaOpMessage &schema_op_msg = *catalog_op.GetSchemaOpMsg(
                         schema_op.table_name_str(), schema_op.table_type());
@@ -320,20 +380,22 @@ public:
             }
             else
             {
-                return;
+                return 0;
             }
         }
+        return 0;
     }
 
-    void UpsertSchemaOpWithinDML(
+    int UpsertSchemaOpWithinDML(
         uint64_t tx_no,
         uint64_t commit_ts,
         const ::google::protobuf::RepeatedPtrField<SchemaOpMessage> &schemas_op)
     {
-        int rc = PersistSchemasOp(tx_no, commit_ts, schemas_op);
-        while (rc != 0)
+        if (const auto rc = PersistSchemasOp(tx_no, commit_ts, schemas_op);
+            rc != 0)
         {
-            rc = PersistSchemasOp(tx_no, commit_ts, schemas_op);
+            LOG(ERROR) << "PersistSchemasOp failed, rc: " << rc;
+            return 1;
         }
 
         // this func is called when on_apply processing WriteLogRequest, might
@@ -351,17 +413,13 @@ public:
             SchemaOpMessage::Stage old_stage = catalog_op.SchemasOpStage();
             if (new_stage > old_stage)
             {
-                if (new_stage == SchemaOpMessage_Stage::
-                                     SchemaOpMessage_Stage_CommitSchema &&
-                    old_stage == SchemaOpMessage_Stage::
-                                     SchemaOpMessage_Stage_PrepareSchema)
+                if (new_stage == SchemaOpMessage_Stage_CommitSchema &&
+                    old_stage == SchemaOpMessage_Stage_PrepareSchema)
                 {
                     catalog_op.CommitAll();
                 }
-                else if (new_stage == SchemaOpMessage_Stage::
-                                          SchemaOpMessage_Stage_CleanSchema &&
-                         old_stage == SchemaOpMessage_Stage::
-                                          SchemaOpMessage_Stage_CommitSchema)
+                else if (new_stage == SchemaOpMessage_Stage_CleanSchema &&
+                         old_stage == SchemaOpMessage_Stage_CommitSchema)
                 {
                     catalog_op.ClearAll();
                 }
@@ -373,6 +431,7 @@ public:
                           << ", ignore";
             }
         }
+        return 0;
     }
 
     std::pair<bool, SplitRangeOpMessage_Stage> SearchTxSplitRangeOp(
@@ -392,64 +451,64 @@ public:
         }
     }
 
-    void UpdateSplitRangeOp(uint64_t tx_num,
-                            uint64_t commit_ts,
-                            const SplitRangeOpMessage &split_range_op_message)
+    int UpdateSplitRangeOp(uint64_t tx_num,
+                           uint64_t commit_ts,
+                           const SplitRangeOpMessage &split_range_op_message)
     {
-        int rc = PersistRangeOp(tx_num, commit_ts, split_range_op_message);
-        while (rc != 0)
-        {
-            rc = PersistRangeOp(tx_num, commit_ts, split_range_op_message);
-        }
-
         std::unique_lock x_lk(log_state_mutex_);
 
         SplitRangeOpMessage::Stage new_stage = split_range_op_message.stage();
         // only insert new entry at prepare stage
-        if (new_stage ==
-            SplitRangeOpMessage_Stage::SplitRangeOpMessage_Stage_PrepareSplit)
+        if (new_stage == SplitRangeOpMessage_Stage_PrepareSplit)
         {
-            auto [it, success] = tx_split_range_ops_.try_emplace(
-                tx_num, split_range_op_message, commit_ts);
-            if (!success)
+            if (tx_split_range_ops_.find(tx_num) != tx_split_range_ops_.end())
             {
                 LOG(INFO) << "duplicate split range prepare log detected, txn: "
                           << tx_num << ", ignore";
-                return;
+                return 0;
             }
+            const std::string range_op_str =
+                split_range_op_message.SerializeAsString();
+            if (const auto rc = PersistRangeOp(tx_num, commit_ts, range_op_str);
+                rc != 0)
+            {
+                LOG(ERROR) << "PersistRangeOp failed, rc: " << rc;
+                return 1;
+            }
+            tx_split_range_ops_.emplace(
+                tx_num, SplitRangeOp{split_range_op_message, commit_ts});
         }
         else
         {
-            auto split_range_op_it = tx_split_range_ops_.find(tx_num);
-
+            const auto split_range_op_it = tx_split_range_ops_.find(tx_num);
             if (split_range_op_it == tx_split_range_ops_.end())
             {
-                return;
+                return 0;
             }
+            commit_ts = split_range_op_it->second.commit_ts_;
 
             SplitRangeOpMessage &split_range_msg =
                 split_range_op_it->second.split_range_op_message_;
             if (new_stage > split_range_msg.stage())
             {
-                if (new_stage == SplitRangeOpMessage_Stage::
-                                     SplitRangeOpMessage_Stage_CommitSplit)
+                SplitRangeOpMessage split_range_msg_copy;
+                if (new_stage == SplitRangeOpMessage_Stage_CommitSplit)
                 {
-                    // slice specs are just written in commit stage log.
-                    split_range_msg.clear_slice_keys();
-                    split_range_msg.clear_slice_sizes();
-
+                    split_range_msg_copy = split_range_msg;
+                    split_range_msg_copy.clear_slice_keys();
+                    split_range_msg_copy.clear_slice_sizes();
                     assert(split_range_op_message.slice_keys_size() + 1 ==
                            split_range_op_message.slice_sizes_size());
                     int idx = 0;
                     for (; idx < split_range_op_message.slice_keys_size();
                          idx++)
                     {
-                        split_range_msg.add_slice_keys(
+                        split_range_msg_copy.add_slice_keys(
                             split_range_op_message.slice_keys(idx));
-                        split_range_msg.add_slice_sizes(
+                        split_range_msg_copy.add_slice_sizes(
                             split_range_op_message.slice_sizes(idx));
                     }
-                    split_range_msg.add_slice_sizes(
+                    split_range_msg_copy.add_slice_sizes(
                         split_range_op_message.slice_sizes(idx));
                 }
                 else
@@ -468,19 +527,29 @@ public:
                     // Free the memory used by split_range_msg by overriding
                     // it as split_range_msg.Clear() won't free the memory
                     // used by message.
-                    split_range_op_it->second.split_range_op_message_ =
-                        SplitRangeOpMessage();
+                    split_range_msg_copy = SplitRangeOpMessage();
                 }
-                split_range_msg.set_stage(new_stage);
+                split_range_msg_copy.set_stage(new_stage);
+                const std::string range_op_str =
+                    split_range_msg_copy.SerializeAsString();
+                if (const auto rc =
+                        PersistRangeOp(tx_num, commit_ts, range_op_str);
+                    rc != 0)
+                {
+                    LOG(ERROR) << "PersistRangeOp failed, rc: " << rc;
+                    return 1;
+                }
+                split_range_op_it->second.split_range_op_message_ =
+                    split_range_msg_copy;
             }
             else
             {
                 LOG(INFO) << "duplicate split range log detected, txn: "
-                          << tx_num << ", stage: " << int(new_stage)
-                          << ", ignore";
-                return;
+                          << tx_num << ", stage: " << new_stage << ", ignore";
+                return 0;
             }
         }
+        return 0;
     }
 
     void CleanSplitRangeOps(uint64_t txn)
@@ -521,6 +590,7 @@ public:
             int rc = PersistCkptAndMaxTxn(timestamp, max_txn);
             while (rc != 0)
             {
+                LOG(ERROR) << "PersistCkptAndMaxTxn failed, rc: " << rc;
                 rc = PersistCkptAndMaxTxn(timestamp, max_txn);
             }
 
@@ -553,8 +623,7 @@ protected:
             for (uint16_t idx = 0; idx < catalog_op.SchemaOpMsgCount(); ++idx)
             {
                 const SchemaOpMessage &msg = catalog_op.SchemaOpMsgs()[idx];
-                if (msg.stage() !=
-                    SchemaOpMessage_Stage::SchemaOpMessage_Stage_CleanSchema)
+                if (msg.stage() != SchemaOpMessage_Stage_CleanSchema)
                 {
                     std::string schema_op_str;
                     msg.SerializeToString(&schema_op_str);
@@ -585,6 +654,11 @@ protected:
             const char *ptr = reinterpret_cast<const char *>(&tabname_len);
             split_range_op_str.append(ptr, sizeof(uint8_t));
             split_range_op_str.append(table_name.data(), tabname_len);
+            auto table_engine =
+                split_range_op.split_range_op_message_.table_engine();
+            const char *table_engine_ptr =
+                reinterpret_cast<const char *>(&table_engine);
+            split_range_op_str.append(table_engine_ptr, sizeof(uint8_t));
             // then, add split range op
             split_range_op.split_range_op_message_.AppendToString(
                 &split_range_op_str);
@@ -666,7 +740,7 @@ protected:
 
     virtual int PersistSchemaOp(uint64_t txn,
                                 uint64_t timestamp,
-                                const SchemaOpMessage &schema_op) = 0;
+                                const std::string &schema_op_str) = 0;
 
     virtual int PersistSchemasOp(
         uint64_t txn,
@@ -678,7 +752,7 @@ protected:
 
     virtual int PersistRangeOp(uint64_t txn,
                                uint64_t timestamp,
-                               const SplitRangeOpMessage &range_op) = 0;
+                               const std::string &range_op_str) = 0;
 
     virtual int DeleteRangeOp(uint64_t txn, uint64_t timestamp) = 0;
 
@@ -734,7 +808,8 @@ protected:
                 bool all_cleaned =
                     std::all_of(schemas_op_msg_.begin(),
                                 schemas_op_msg_.end(),
-                                [](const SchemaOpMessage &schema_op_msg) {
+                                [](const SchemaOpMessage &schema_op_msg)
+                                {
                                     return schema_op_msg.stage() ==
                                            SchemaOpMessage_Stage_CleanSchema;
                                 });
@@ -747,7 +822,8 @@ protected:
                 bool all_committed =
                     std::all_of(schemas_op_msg_.begin(),
                                 schemas_op_msg_.end(),
-                                [](const SchemaOpMessage &schema_op_msg) {
+                                [](const SchemaOpMessage &schema_op_msg)
+                                {
                                     return schema_op_msg.stage() ==
                                            SchemaOpMessage_Stage_CommitSchema;
                                 });

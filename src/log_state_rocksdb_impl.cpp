@@ -316,15 +316,18 @@ int LogStateRocksDBImpl::Start()
         // last_ckpt_ts
         std::array<char, 17> key;
         std::string value;
-        Serialize(
-            key, UINT64_MAX, UINT64_MAX, (uint8_t) LogState::MetaOp::LastCkpt);
+        Serialize(key,
+                  UINT64_MAX,
+                  UINT64_MAX,
+                  static_cast<uint8_t>(LogState::MetaOp::LastCkpt));
         rocksdb::Status rc = db_->Get(read_options,
                                       meta_handle_,
                                       rocksdb::Slice(key.data(), key.size()),
                                       &value);
         if (rc.ok())
         {
-            cc_ng_info_.last_ckpt_ts_ = *((uint64_t *) value.data());
+            cc_ng_info_.last_ckpt_ts_ =
+                *reinterpret_cast<uint64_t *>(value.data());
         }
         else if (rc.IsNotFound())
         {
@@ -382,13 +385,13 @@ int LogStateRocksDBImpl::Start()
 
             uint64_t timestamp;
             uint64_t tx_number;
-            ::google::protobuf::RepeatedPtrField<SchemaOpMessage>
-                new_schemas_op_msg;
             SplitRangeOpMessage_Stage new_range_stage;
             SplitRangeOpMessage new_range_op_msg;
 
             while (it->Valid())
             {
+                ::google::protobuf::RepeatedPtrField<SchemaOpMessage>
+                    new_schemas_op_msg;
                 // Get the key and value as rocksdb::Slice
                 rocksdb::Slice key_slice = it->key();
                 rocksdb::Slice value_slice = it->value();
@@ -427,7 +430,6 @@ int LogStateRocksDBImpl::Start()
                     {
                         auto catalog_it = tx_catalog_ops_.find(tx_number);
                         assert(catalog_it != tx_catalog_ops_.end());
-
                         // The schema operation has been logged. Only
                         // updates the stage.
                         assert(static_cast<int>(
@@ -480,6 +482,16 @@ int LogStateRocksDBImpl::Start()
                     }
                 }
 
+                uint32_t latest_txn_no =
+                    cc_ng_info_.latest_txn_no_.load(std::memory_order_relaxed);
+                // assuming the range of transaction number within UINT32_MAX/2
+                if (static_cast<int32_t>(
+                        static_cast<uint32_t>(tx_number & 0xFFFFFFFF) -
+                        latest_txn_no) > 0)
+                {
+                    cc_ng_info_.latest_txn_no_.store(latest_txn_no,
+                                                     std::memory_order_relaxed);
+                }
                 // Move to the next key
                 it->Next();
             }
@@ -789,56 +801,19 @@ void LogStateRocksDBImpl::PurgingSstFiles()
     }
 }
 
+
 int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
                                          uint64_t timestamp,
-                                         const SchemaOpMessage &schema_op_msg)
+                                         const std::string &schema_op_str)
 {
     std::array<char, 17> key{};
-    std::string schemas_op_str;
     rocksdb::ReadOptions read_options;
-    rocksdb::Status rc;
 
-    Serialize(key, timestamp, txn, (uint8_t) LogState::MetaOp::SchemaOp);
-    rc = db_->Get(read_options,
-                  meta_handle_,
-                  rocksdb::Slice(key.data(), key.size()),
-                  &schemas_op_str);
-    if (!rc.ok() && !rc.IsNotFound())
-    {
-        return rc.code();
-    }
-
-    if (rc.IsNotFound())
-    {
-        schema_op_msg.SerializeToString(&schemas_op_str);
-    }
-    else
-    {
-        SchemaOpMessage schema_op_msg_stored;
-
-        char *ptr = schemas_op_str.data();
-        uint16_t schema_cnt = *reinterpret_cast<uint16_t *>(ptr);
-        ptr += sizeof(schema_cnt);
-        for (uint16_t idx = 0; idx < schema_cnt; ++idx)
-        {
-            uint32_t schema_len = *reinterpret_cast<uint32_t *>(ptr);
-            ptr += sizeof(schema_len);
-            schema_op_msg_stored.ParseFromArray(ptr, schema_len);
-
-            if (schema_op_msg_stored.table_name_str() ==
-                    schema_op_msg.table_name_str() &&
-                schema_op_msg_stored.table_type() == schema_op_msg.table_type())
-            {
-                if (schema_op_msg_stored.stage() < schema_op_msg.stage())
-                {
-                    schema_op_msg.SerializeToArray(ptr, schema_len);
-                }
-            }
-        }
-    }
-
-    rc = db_->Put(
-        write_option_, rocksdb::Slice(key.data(), key.size()), schemas_op_str);
+    Serialize(key, timestamp, txn, static_cast<uint8_t>(MetaOp::SchemaOp));
+    const rocksdb::Status rc = db_->Put(write_option_,
+                                        meta_handle_,
+                                        rocksdb::Slice(key.data(), key.size()),
+                                        schema_op_str);
     return rc.ok() ? 0 : rc.code();
 }
 
@@ -848,7 +823,7 @@ int LogStateRocksDBImpl::PersistSchemasOp(
     const ::google::protobuf::RepeatedPtrField<SchemaOpMessage> &schemas_op)
 {
     std::array<char, 17> key{};
-    Serialize(key, timestamp, txn, (uint8_t) LogState::MetaOp::SchemaOp);
+    Serialize(key, timestamp, txn, static_cast<uint8_t>(MetaOp::SchemaOp));
 
     std::string schemas_op_str;
 
@@ -874,7 +849,7 @@ int LogStateRocksDBImpl::PersistSchemasOp(
 int LogStateRocksDBImpl::DeleteSchemaOp(uint64_t txn, uint64_t timestamp)
 {
     std::array<char, 17> key{};
-    Serialize(key, timestamp, txn, (uint8_t) LogState::MetaOp::SchemaOp);
+    Serialize(key, timestamp, txn, static_cast<uint8_t>(MetaOp::SchemaOp));
 
     rocksdb::Status rc = db_->Delete(
         write_option_, meta_handle_, rocksdb::Slice(key.data(), key.size()));
@@ -884,34 +859,15 @@ int LogStateRocksDBImpl::DeleteSchemaOp(uint64_t txn, uint64_t timestamp)
 
 int LogStateRocksDBImpl::PersistRangeOp(uint64_t txn,
                                         uint64_t timestamp,
-                                        const SplitRangeOpMessage &range_op_msg)
+                                        const std::string &range_op_str)
 {
-    std::string range_op_str;
-    SplitRangeOpMessage_Stage new_stage = range_op_msg.stage();
-    if (new_stage >
-        SplitRangeOpMessage_Stage::SplitRangeOpMessage_Stage_PrepareSplit)
-    {
-        auto range_it = tx_split_range_ops_.find(txn);
-        assert(range_it != tx_split_range_ops_.end());
-        SplitRangeOpMessage &current_range_op_msg =
-            range_it->second.split_range_op_message_;
-        current_range_op_msg.set_stage(new_stage);
-        // only overwrite satge
-        range_op_str = current_range_op_msg.SerializeAsString();
-    }
-    else
-    {
-        range_op_str = range_op_msg.SerializeAsString();
-    }
-    // std::string op_str = range_op.SerializeAsString();
-
     std::array<char, 17> key{};
-    Serialize(key, timestamp, txn, (uint8_t) LogState::MetaOp::RangeOp);
+    Serialize(key, timestamp, txn, static_cast<uint8_t>(MetaOp::RangeOp));
 
-    rocksdb::Status rc = db_->Put(write_option_,
-                                  meta_handle_,
-                                  rocksdb::Slice(key.data(), key.size()),
-                                  range_op_str);
+    const rocksdb::Status rc = db_->Put(write_option_,
+                                        meta_handle_,
+                                        rocksdb::Slice(key.data(), key.size()),
+                                        range_op_str);
 
     return rc.ok() ? 0 : rc.code();
 }

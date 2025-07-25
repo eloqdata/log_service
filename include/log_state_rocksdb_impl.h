@@ -405,7 +405,7 @@ public:
 private:
     int PersistSchemaOp(uint64_t txn,
                         uint64_t timestamp,
-                        const SchemaOpMessage &schema_op) override;
+                        const std::string &schema_op_str) override;
 
     int PersistSchemasOp(
         uint64_t txn,
@@ -417,7 +417,7 @@ private:
 
     int PersistRangeOp(uint64_t txn,
                        uint64_t timestamp,
-                       const SplitRangeOpMessage &range_op) override;
+                       const std::string &range_op_str) override;
 
     int DeleteRangeOp(uint64_t txn, uint64_t timestamp) override;
 

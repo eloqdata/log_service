@@ -219,6 +219,7 @@ void OpenLogTaskWorker::HandleWriteLog(const WriteLogRequest &req,
 {
     const uint64_t timestamp = req.commit_timestamp();
     uint64_t txn = req.txn_number();
+    LOG(INFO) << "HandleWriteLog txn " << txn << " timestamp " << timestamp;
     int err = 0;
 
     const LogContentMessage &log_content = req.log_content();
@@ -230,8 +231,10 @@ void OpenLogTaskWorker::HandleWriteLog(const WriteLogRequest &req,
 
         if (!data_log.schema_logs().empty())
         {
-            log_state_->UpsertSchemaOpWithinDML(
+            err = log_state_->UpsertSchemaOpWithinDML(
                 req.txn_number(), timestamp, data_log.schema_logs());
+            if (err != 0)
+                break;
         }
 
         // Process individual data log entries - batching is now done at
@@ -249,14 +252,14 @@ void OpenLogTaskWorker::HandleWriteLog(const WriteLogRequest &req,
     case LogContentMessage::ContentCase::kSchemaLog:
     {
         const SchemaOpMessage &schema_log = log_content.schema_log();
-        log_state_->UpsertSchemaOp(txn, timestamp, schema_log);
+        err = log_state_->UpsertSchemaOp(txn, timestamp, schema_log);
         break;
     }
     case LogContentMessage::ContentCase::kSplitRangeLog:
     {
         const SplitRangeOpMessage &split_range_op_message =
             log_content.split_range_log();
-        log_state_->UpdateSplitRangeOp(txn, timestamp, split_range_op_message);
+        err = log_state_->UpdateSplitRangeOp(txn, timestamp, split_range_op_message);
         break;
     }
     default:

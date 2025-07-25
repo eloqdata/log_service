@@ -74,6 +74,7 @@ void OpenLogServiceImpl::ReplayLog(
     uint64_t start_ts = last_ckpt_ts == 0 ? 0 : last_ckpt_ts + 1;
     if (req.start_ts() != 0)
     {
+        LOG(INFO) << "ReplayLog requset to start from " << req.start_ts();
         start_ts = std::min(start_ts, req.start_ts());
     }
     LOG(INFO) << "Start replaying from timestamp " << start_ts;

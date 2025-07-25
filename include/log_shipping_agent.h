@@ -537,6 +537,7 @@ private:
         }
         if (global_max_ts > last_ckpt_ts_)
         {
+            assert(latest_txn_no_ <= global_latest_txn_no);
             latest_txn_no_ = global_latest_txn_no;
         }
 
