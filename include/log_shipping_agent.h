@@ -40,8 +40,8 @@
 namespace txlog
 {
 
-static int64_t DEFAULT_CC_NG_TERM = 1;
-static uint32_t DEFAULT_CC_NG_ID = 0;
+constexpr int64_t DEFAULT_CC_NG_TERM = 1;
+constexpr uint32_t DEFAULT_CC_NG_ID = 0;
 
 /*
  * Agent to ship redo log records to cc node leader, who is waiting for

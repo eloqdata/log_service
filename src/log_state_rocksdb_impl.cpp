@@ -383,8 +383,8 @@ int LogStateRocksDBImpl::Start()
             // Get the entry with the lowest key(smallest tx_number+stage)
             it->SeekToFirst();
 
-            uint64_t timestamp;
-            uint64_t tx_number;
+            uint64_t timestamp = 0;
+            uint64_t tx_number = 0;
             SplitRangeOpMessage_Stage new_range_stage;
             SplitRangeOpMessage new_range_op_msg;
 
