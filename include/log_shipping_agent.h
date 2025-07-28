@@ -296,6 +296,7 @@ private:
         }
 
         ReplayMessage replay_msg;
+        replay_msg.set_is_lock_recovery(true);
         replay_msg.set_cc_node_group_id(cc_node_group_id_);
         replay_msg.set_cc_node_group_term(cc_node_group_term_);
 
