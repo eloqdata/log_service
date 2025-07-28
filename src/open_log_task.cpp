@@ -259,7 +259,8 @@ void OpenLogTaskWorker::HandleWriteLog(const WriteLogRequest &req,
     {
         const SplitRangeOpMessage &split_range_op_message =
             log_content.split_range_log();
-        err = log_state_->UpdateSplitRangeOp(txn, timestamp, split_range_op_message);
+        err = log_state_->UpdateSplitRangeOp(
+            txn, timestamp, split_range_op_message);
         break;
     }
     default:

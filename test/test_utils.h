@@ -31,7 +31,6 @@
 #include <thread>
 
 #include "glog/logging.h"
-
 #include "log_utils.h"
 
 #if defined(USE_ROCKSDB_LOG_STATE)

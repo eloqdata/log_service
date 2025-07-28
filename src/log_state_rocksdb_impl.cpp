@@ -47,7 +47,7 @@ LogStateRocksDBImpl::LogStateRocksDBImpl(std::string rocksdb_path,
       rocksdb_storage_path_(std::move(rocksdb_path)),
       sst_files_size_limit_(sst_files_size_limit),
       rocksdb_scan_threads_(rocksdb_scan_threads),
-      last_purging_sst_ckpt_ts_(0) {};
+      last_purging_sst_ckpt_ts_(0){};
 
 LogStateRocksDBImpl::~LogStateRocksDBImpl()
 {
@@ -800,7 +800,6 @@ void LogStateRocksDBImpl::PurgingSstFiles()
         }
     }
 }
-
 
 int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
                                          uint64_t timestamp,
