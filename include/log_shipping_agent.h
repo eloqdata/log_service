@@ -611,10 +611,12 @@ private:
     static void AppendLogBlob(std::string &blob, const txlog::Item &item)
     {
         uint64_t timestamp = item.timestamp_;
+        uint64_t tx_number = item.tx_number_;
         const std::string &log_message = item.log_message_;
 
         uint32_t message_length = log_message.size();
         blob.append(reinterpret_cast<char *>(&timestamp), sizeof(uint64_t));
+        blob.append(reinterpret_cast<char *>(&tx_number), sizeof(uint64_t));
         blob.append(reinterpret_cast<char *>(&message_length),
                     sizeof(uint32_t));
         blob.append(log_message.data(), message_length);
