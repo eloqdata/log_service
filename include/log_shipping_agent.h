@@ -340,7 +340,7 @@ private:
             }
             else if (item->item_type_ == LogItemType::DataLog)
             {
-                if (log_records_blob->size() + sizeof(uint64_t) * 2 +
+                if (log_records_blob->size() + sizeof(uint64_t) * 3 +
                         item->log_message_.size() >
                     log_records_batch_size)
                 {
