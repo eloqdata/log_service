@@ -24,9 +24,8 @@
 #if defined(USE_ROCKSDB_LOG_STATE) && defined(WITH_ROCKSDB_CLOUD)
 #include <string>
 
-#include "rocksdb/cloud/db_cloud.h"
-
 #include "log_utils.h"
+#include "rocksdb/cloud/db_cloud.h"
 
 namespace txlog
 {
@@ -82,20 +81,14 @@ inline rocksdb::Status NewCloudFileSystem(
 #if (WITH_ROCKSDB_CLOUD == CS_TYPE_S3)
     // AWS s3 file system
     auto status = rocksdb::CloudFileSystemEnv::NewAwsFileSystem(
-        rocksdb::FileSystem::Default(),
-        cfs_options,
-        nullptr,
-        cfs);
+        rocksdb::FileSystem::Default(), cfs_options, nullptr, cfs);
 #elif (WITH_ROCKSDB_CLOUD == CS_TYPE_GCS)
     // Google cloud storage file system
     auto status = rocksdb::CloudFileSystem::NewGcpFileSystem(
-        rocksdb::FileSystem::Default(),
-        cfs_options,
-        nullptr,
-        cfs);
+        rocksdb::FileSystem::Default(), cfs_options, nullptr, cfs);
 #endif
     return status;
 };
 
-}// namespace txlog
+}  // namespace txlog
 #endif

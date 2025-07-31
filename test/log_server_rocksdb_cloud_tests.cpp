@@ -144,7 +144,7 @@ public:
     FakeReplayService(
         txlog::LogAgent *log_agent,
         std::vector<std::unique_ptr<txlog::ReplayMessage>> *replay_messages)
-        : log_agent_(log_agent), replay_messages_(replay_messages) {};
+        : log_agent_(log_agent), replay_messages_(replay_messages){};
     ~FakeReplayService() = default;
 
     void Connect(::google::protobuf::RpcController *controller,
@@ -224,7 +224,7 @@ public:
     FakeReplayServer(
         txlog::LogAgent *log_agent,
         std::vector<std::unique_ptr<txlog::ReplayMessage>> *replay_messages)
-        : brpc_server_(), replay_service_(log_agent, replay_messages) {};
+        : brpc_server_(), replay_service_(log_agent, replay_messages){};
     ~FakeReplayServer() = default;
 
     void Start()

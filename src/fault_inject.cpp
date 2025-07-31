@@ -21,11 +21,10 @@
  */
 #include "fault_inject.h"
 
+#include <algorithm>
 #include <csignal>
-
 #include <string>
 
-#include <algorithm>
 #include "butil/logging.h"
 
 namespace txlog

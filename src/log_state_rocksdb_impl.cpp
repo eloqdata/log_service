@@ -47,7 +47,7 @@ LogStateRocksDBImpl::LogStateRocksDBImpl(std::string rocksdb_path,
       rocksdb_storage_path_(std::move(rocksdb_path)),
       sst_files_size_limit_(sst_files_size_limit),
       rocksdb_scan_threads_(rocksdb_scan_threads),
-      last_purging_sst_ckpt_ts_(0) {};
+      last_purging_sst_ckpt_ts_(0){};
 
 LogStateRocksDBImpl::~LogStateRocksDBImpl()
 {
@@ -383,8 +383,8 @@ int LogStateRocksDBImpl::Start()
             // Get the entry with the lowest key(smallest tx_number+stage)
             it->SeekToFirst();
 
-            uint64_t timestamp;
-            uint64_t tx_number;
+            uint64_t timestamp = 0;
+            uint64_t tx_number = 0;
             SplitRangeOpMessage_Stage new_range_stage;
             SplitRangeOpMessage new_range_op_msg;
 
@@ -800,7 +800,6 @@ void LogStateRocksDBImpl::PurgingSstFiles()
         }
     }
 }
-
 
 int LogStateRocksDBImpl::PersistSchemaOp(uint64_t txn,
                                          uint64_t timestamp,

@@ -73,7 +73,7 @@ class ItemIterator
 {
 public:
     explicit ItemIterator(std::vector<Item::Pointer> &&item_list)
-        : ddl_list_(std::move(item_list)), ddl_idx_(0) {};
+        : ddl_list_(std::move(item_list)), ddl_idx_(0){};
     virtual ~ItemIterator() = default;
     ItemIterator(const ItemIterator &) = delete;
     void operator=(const ItemIterator &) = delete;
@@ -808,8 +808,7 @@ protected:
                 bool all_cleaned =
                     std::all_of(schemas_op_msg_.begin(),
                                 schemas_op_msg_.end(),
-                                [](const SchemaOpMessage &schema_op_msg)
-                                {
+                                [](const SchemaOpMessage &schema_op_msg) {
                                     return schema_op_msg.stage() ==
                                            SchemaOpMessage_Stage_CleanSchema;
                                 });
@@ -822,8 +821,7 @@ protected:
                 bool all_committed =
                     std::all_of(schemas_op_msg_.begin(),
                                 schemas_op_msg_.end(),
-                                [](const SchemaOpMessage &schema_op_msg)
-                                {
+                                [](const SchemaOpMessage &schema_op_msg) {
                                     return schema_op_msg.stage() ==
                                            SchemaOpMessage_Stage_CommitSchema;
                                 });

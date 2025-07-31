@@ -40,8 +40,8 @@
 namespace txlog
 {
 
-static int64_t DEFAULT_CC_NG_TERM = 1;
-static uint32_t DEFAULT_CC_NG_ID = 0;
+constexpr int64_t DEFAULT_CC_NG_TERM = 1;
+constexpr uint32_t DEFAULT_CC_NG_ID = 0;
 
 /*
  * Agent to ship redo log records to cc node leader, who is waiting for
@@ -296,6 +296,7 @@ private:
         }
 
         ReplayMessage replay_msg;
+        replay_msg.set_is_lock_recovery(true);
         replay_msg.set_cc_node_group_id(cc_node_group_id_);
         replay_msg.set_cc_node_group_term(cc_node_group_term_);
 
@@ -339,7 +340,7 @@ private:
             }
             else if (item->item_type_ == LogItemType::DataLog)
             {
-                if (log_records_blob->size() + sizeof(uint64_t) * 2 +
+                if (log_records_blob->size() + sizeof(uint64_t) * 3 +
                         item->log_message_.size() >
                     log_records_batch_size)
                 {
@@ -355,7 +356,18 @@ private:
                     replay_msg.clear_split_range_op_msgs();
                     replay_msg.clear_cluster_scale_op_msg();
                 }
-                AppendLogBlob(*log_records_blob, *item);
+                uint32_t message_length = item->log_message_.size();
+                log_records_blob->append(
+                    reinterpret_cast<const char *>(&item->timestamp_),
+                    sizeof(uint64_t));
+                log_records_blob->append(
+                    reinterpret_cast<const char *>(&item->tx_number_),
+                    sizeof(uint64_t));
+                log_records_blob->append(
+                    reinterpret_cast<char *>(&message_length),
+                    sizeof(uint32_t));
+                log_records_blob->append(item->log_message_.data(),
+                                         message_length);
             }
         }
 
@@ -419,8 +431,8 @@ private:
                 split_range_msg->set_txn(item.tx_number_);
             }
         }
-        int err = SendMessage(replay_msg, buf, false, eagain);
-        if (err != 0)
+        if (const int err = SendMessage(replay_msg, buf, false, eagain);
+            err != 0)
         {
             return err;
         }
@@ -499,11 +511,21 @@ private:
                                 replay_msg.clear_binary_log_records();
                             }
 
-                            AppendLogBlob(*log_records_blob, item);
+                            uint32_t message_length = item.log_message_.size();
+                            log_records_blob->append(
+                                reinterpret_cast<const char *>(
+                                    &item.timestamp_),
+                                sizeof(uint64_t));
+                            log_records_blob->append(
+                                reinterpret_cast<char *>(&message_length),
+                                sizeof(uint32_t));
+                            log_records_blob->append(item.log_message_.data(),
+                                                     message_length);
                         }
                     }
-                    int err = SendMessage(replay_msg, buf, false, eagain);
-                    if (err != 0)
+                    if (const int err =
+                            SendMessage(replay_msg, buf, false, eagain);
+                        err != 0)
                     {
                         data_log_send_err.store(err, std::memory_order_relaxed);
                         return;
@@ -527,12 +549,12 @@ private:
         // Update latest_txn_no_ based on the thread with the max timestamp
         uint64_t global_max_ts = last_ckpt_ts_;
         uint32_t global_latest_txn_no = 0;
-        for (const auto &result : thread_results)
+        for (const auto &[max_ts, latest_txn_no] : thread_results)
         {
-            if (result.max_ts > global_max_ts)
+            if (max_ts > global_max_ts)
             {
-                global_max_ts = result.max_ts;
-                global_latest_txn_no = result.latest_txn_no;
+                global_max_ts = max_ts;
+                global_latest_txn_no = latest_txn_no;
             }
         }
         if (global_max_ts > last_ckpt_ts_)
@@ -605,18 +627,6 @@ private:
         }
         // error_code == 0 or interrupted or stream invalid
         return error_code;
-    }
-
-    static void AppendLogBlob(std::string &blob, const txlog::Item &item)
-    {
-        uint64_t timestamp = item.timestamp_;
-        const std::string &log_message = item.log_message_;
-
-        uint32_t message_length = log_message.size();
-        blob.append(reinterpret_cast<char *>(&timestamp), sizeof(uint64_t));
-        blob.append(reinterpret_cast<char *>(&message_length),
-                    sizeof(uint32_t));
-        blob.append(log_message.data(), message_length);
     }
 
     const uint32_t log_group_id_;
