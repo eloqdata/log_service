@@ -33,8 +33,6 @@ DEFINE_string(raft_conf,
               "Initial configuration of the replication group");
 DEFINE_string(group, "0", "which group this raft instance is in");
 DEFINE_string(storage_path, "local:///mnt/raft_data", "raft storage path");
-// ./launch_server -monograph_port=8200
-// -raft_conf="10.3.1.17:8100:0,10.3.1.17:8200:1,10.3.1.17:8300:2|10.3.1.17:8400:0,10.3.1.17:8500:1,10.3.1.17:8600:2"
 
 void run_direct(std::string ip,
                 uint32_t port,
