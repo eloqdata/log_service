@@ -113,8 +113,6 @@ if ((NOT LEVELDB_INCLUDE_PATH) OR (NOT LEVELDB_LIB))
 endif ()
 include_directories(${LEVELDB_INCLUDE_PATH})
 
-set(LOG_SHIPPING_THREADS_NUM 8)
-
 if (OVERRIDE_GFLAGS_NAMESPACE)
     add_compile_definitions(OVERRIDE_GFLAGS_NAMESPACE)
 endif ()
