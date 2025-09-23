@@ -70,11 +70,6 @@ DEFINE_uint32(check_replay_log_size_interval_sec,
               10,
               "The interval for checking txlogs size used in tx recovery.");
 
-DEFINE_string(notify_checkpointer_threshold_size,
-              "1GB",
-              "When the size of non-checkpoint txlogs reache this threshold, "
-              "the log_service sends a checkpoint request to tx_service.");
-
 DEFINE_bool(enable_brpc_builtin_services,
             true,
             "Enable showing brpc builtin services through http.");
@@ -140,8 +135,6 @@ void launch(const std::string &tt_conf,
         port_list.emplace_back(std::stoi(port));
     }
 
-    uint64_t notify_checkpointer_threshold_size =
-        txlog::parse_size(FLAGS_notify_checkpointer_threshold_size);
     uint64_t rocksdb_target_file_size_base =
         txlog::parse_size(FLAGS_rocksdb_target_file_size_base);
     size_t rocksdb_sst_files_size_limit =
@@ -296,12 +289,6 @@ int main(int argc, char *argv[])
                   "local",
                   "check_replay_log_size_interval_sec",
                   FLAGS_check_replay_log_size_interval_sec);
-    FLAGS_notify_checkpointer_threshold_size =
-        !CheckCommandLineFlagIsDefault("notify_checkpointer_threshold_size")
-            ? FLAGS_notify_checkpointer_threshold_size
-            : config_reader.GetString("local",
-                                      "notify_checkpointer_threshold_size",
-                                      FLAGS_notify_checkpointer_threshold_size);
     FLAGS_enable_brpc_builtin_services =
         !CheckCommandLineFlagIsDefault("enable_brpc_builtin_services")
             ? FLAGS_enable_brpc_builtin_services
