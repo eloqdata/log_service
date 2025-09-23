@@ -19,7 +19,6 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#ifdef USE_ROCKSDB_LOG_STATE
 #include <gflags/gflags.h>
 
 #include <chrono>
@@ -28,19 +27,7 @@
 #include <random>
 #include <thread>
 
-#include "log_utils.h"
-
-#if WITH_ROCKSDB_CLOUD == CS_TYPE_S3
-#include <aws/core/Aws.h>
-#include <aws/core/utils/logging/AWSLogging.h>
-#include <aws/core/utils/logging/DefaultLogSystem.h>
-#endif
-
-#ifdef WITH_ROCKSDB_CLOUD
-#include "rocksdb/cloud/db_cloud.h"
-#else
 #include "rocksdb/db.h"
-#endif
 
 #include "test_utils.h"
 
@@ -53,18 +40,6 @@ DEFINE_uint32(sleep_duration,
               30,
               "Sleep duration in middle of insert and iterate");
 
-#if WITH_ROCKSDB_CLOUD == CS_TYPE_S3
-DEFINE_string(aws_access_key_id, "", "AWS_ACCESS_KEY_ID");
-DEFINE_string(aws_secret_access_key, "", "AWS_SECRET_ACCESS_KEY");
-#endif
-
-#ifdef WITH_ROCKSDB_CLOUD
-DEFINE_string(bucket_name, "", "S3 bucket name");
-DEFINE_string(bucket_prefix, "", "S3 bucket prefix");
-DEFINE_string(region, "", "Regin");
-DEFINE_string(sst_file_cache_size, "1GB", "Local sst cache size");
-#endif
-
 DEFINE_bool(populate_data, true, "Populate data at first");
 DEFINE_bool(scan_data, true, "Scan data");
 
@@ -75,12 +50,7 @@ std::uniform_int_distribution<uint64_t> distribution(0, 0xFFFFFFFF);
 // key for query
 std::array<char, 20> random_query_key;
 
-// cloud db
-#ifdef WITH_ROCKSDB_CLOUD
-rocksdb::DBCloud *db;
-#else
 rocksdb::DB *db;
-#endif
 
 void Serialize(std::array<char, 20> &res,
                uint32_t ng_id,
@@ -310,64 +280,7 @@ int main(int argc, char *argv[])
     uint32_t test_duration = FLAGS_test_duration;
     rocksdb::Status status;
 
-#ifdef WITH_ROCKSDB_CLOUD
-
-#if WITH_ROCKSDB_CLOUD == CS_TYPE_S3
-    Aws::SDKOptions aws_options;
-    aws_options.loggingOptions.logLevel = Aws::Utils::Logging::LogLevel::Info;
-    Aws::InitAPI(aws_options);
-#endif
-
-    // cloud fs config
-    rocksdb::CloudFileSystemOptions cfs_options;
-    // Store a reference to a cloud file system. A new cloud file system object
-    // should be associated with every new cloud-db.
-    std::shared_ptr<rocksdb::FileSystem> cloud_fs;
-    // cloud fs
-#if WITH_ROCKSDB_CLOUD == CS_TYPE_S3
-    cfs_options.credentials.InitializeSimple(FLAGS_aws_access_key_id,
-                                             FLAGS_aws_secret_access_key);
-    if (!cfs_options.credentials.HasValid().ok())
-    {
-        std::cerr
-            << "Valid AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY is required."
-            << std::endl;
-        return -1;
-    }
-#endif
-    cfs_options.src_bucket.SetBucketName(FLAGS_bucket_name,
-                                         FLAGS_bucket_prefix);
-    cfs_options.src_bucket.SetRegion(FLAGS_region);
-    cfs_options.dest_bucket.SetObjectPath(FLAGS_database_path);
-    cfs_options.dest_bucket.SetBucketName(FLAGS_bucket_name,
-                                          FLAGS_bucket_prefix);
-    cfs_options.dest_bucket.SetRegion(FLAGS_region);
-    cfs_options.dest_bucket.SetObjectPath(FLAGS_database_path);
-
-    // cfs_options.use_aws_transfer_manager = true;
-    // cfs_options.use_direct_io_for_cloud_download = true;
-    // cfs_options.skip_cloud_files_in_getchildren = true;
-
-    // AWS s3 file system
-    rocksdb::CloudFileSystem *cfs;
-    status = rocksdb::CloudFileSystemEnv::NewAwsFileSystem(
-        rocksdb::FileSystem::Default(), cfs_options, nullptr, &cfs);
-
-    if (!status.ok())
-    {
-        std::cerr << "Unable to open db at path " << FLAGS_database_path
-                  << " with bucket " << FLAGS_bucket_name << std::endl;
-        return -1;
-    }
-    cloud_fs.reset(cfs);
-    // Create options and use the AWS file system that we created earlier
-    auto cloud_env = rocksdb::NewCompositeEnv(cloud_fs);
-#endif
-
     rocksdb::Options options;
-#ifdef WITH_ROCKSDB_CLOUD
-    options.env = cloud_env.get();
-#endif
     options.create_if_missing = true;
     // this option is important, this set disable_auto_compaction to false will
     // half the throughput (100MB/s -> 50MB/s)
@@ -384,11 +297,7 @@ int main(int argc, char *argv[])
     // options.disable_auto_flush = true;
 
     auto s = now();
-#ifdef WITH_ROCKSDB_CLOUD
-    status = rocksdb::DBCloud::Open(options, FLAGS_database_path, "", 0, &db);
-#else
     status = rocksdb::DB::Open(options, FLAGS_database_path, &db);
-#endif
 
     auto e = now();
     uint64_t t = duration(s, e);
@@ -437,9 +346,4 @@ int main(int argc, char *argv[])
 
     db->Close();
     delete db;
-
-#if WITH_ROCKSDB_CLOUD == CS_TYPE_S3
-    Aws::ShutdownAPI(aws_options);
-#endif
 }
-#endif

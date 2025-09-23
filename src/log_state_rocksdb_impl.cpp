@@ -24,7 +24,6 @@
 
 #include <cstdint>
 #include <string>
-#if defined(USE_ROCKSDB_LOG_STATE) && !defined(WITH_ROCKSDB_CLOUD)
 
 #include <rocksdb/sst_file_reader.h>
 #include <rocksdb/utilities/checkpoint.h>
@@ -1022,4 +1021,3 @@ std::string RocksDBEventListener::GetFlushReason(
     }
 }
 }  // namespace txlog
-#endif
