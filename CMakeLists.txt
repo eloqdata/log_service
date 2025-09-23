@@ -138,8 +138,6 @@ set(LOG_LIB
         ${ROCKSDB_LIB}
         )
 
-# add preprocessor definition USE_ROCKSDB_LOG_STATE
-add_compile_definitions(USE_ROCKSDB_LOG_STATE)
 # one shipping thread is enough for rocksdb version log state
 set(LOG_SHIPPING_THREADS_NUM 1)
 
@@ -198,8 +196,6 @@ if (TEST_LOG_SERVICE)
     add_executable(async_write_log_test ${LOG_SOURCE_DIR}/test/async_write_log_test.cpp)
     target_link_libraries(async_write_log_test PUBLIC logservice)
 
-    if (USE_ROCKSDB_LOG_STATE)
-       add_executable(rocksdb_test ${LOG_SOURCE_DIR}/test/rocksdb_test.cpp)
-       target_link_libraries(rocksdb_test PUBLIC logservice)
-    endif ()
+    add_executable(rocksdb_test ${LOG_SOURCE_DIR}/test/rocksdb_test.cpp)
+    target_link_libraries(rocksdb_test PUBLIC logservice)
 endif ()
