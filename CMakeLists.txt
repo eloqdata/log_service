@@ -141,6 +141,8 @@ set(LOG_LIB
 # one shipping thread is enough for rocksdb version log state
 set(LOG_SHIPPING_THREADS_NUM 1)
 
+# Add for compatiable reason
+add_compile_definitions(LOG_STATE_TYPE_RKDB)
 
 find_package(Protobuf REQUIRED)
 
