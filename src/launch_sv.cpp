@@ -42,10 +42,6 @@ namespace GFLAGS_NAMESPACE = google;
 #endif
 #endif
 
-#if defined(USE_ROCKSDB_LOG_STATE) && (WITH_ROCKSDB_CLOUD == CS_TYPE_S3)
-#include <aws/core/Aws.h>
-#endif
-
 DEFINE_string(config_path, "", "Configuration file path");
 
 DEFINE_uint32(start_log_group_id, 0, "Start log group id");
@@ -74,67 +70,15 @@ DEFINE_uint32(check_replay_log_size_interval_sec,
               10,
               "The interval for checking txlogs size used in tx recovery.");
 
-DEFINE_string(notify_checkpointer_threshold_size,
-              "1GB",
-              "When the size of non-checkpoint txlogs reache this threshold, "
-              "the log_service sends a checkpoint request to tx_service.");
-
 DEFINE_bool(enable_brpc_builtin_services,
             true,
             "Enable showing brpc builtin services through http.");
 
 DEFINE_uint32(rocksdb_scan_threads, 1, "The number of rocksdb scan threads");
 
-#if defined(USE_ROCKSDB_LOG_STATE) && (WITH_ROCKSDB_CLOUD == CS_TYPE_S3)
-DEFINE_string(aws_access_key_id, "", "AWS_ACCESS_KEY_ID");
-DEFINE_string(aws_secret_key, "", "AWS_SECRET_KEY");
-#endif
-
-#if defined(USE_ROCKSDB_LOG_STATE) && defined(WITH_ROCKSDB_CLOUD)
-DEFINE_string(region, "", "Cloud service regin");
-DEFINE_string(bucket_name, "", "Cloud storage bucket name");
-DEFINE_string(bucket_prefix, "", "Cloud storage bucket prefix");
-DEFINE_string(sst_file_cache_size, "10GB", "Local sst cache size");
-DEFINE_uint32(
-    rocksdb_cloud_ready_timeout,
-    10,
-    "Timeout before rocksdb cloud becoming ready on new log group leader");
-DEFINE_uint32(rocksdb_cloud_file_deletion_delay,
-              3600,
-              "The file deletion delay for rocksdb cloud file");
-DEFINE_uint32(log_retention_days,
-              90,
-              "The number of days for which logs should be retained");
-DEFINE_string(log_purger_schedule,
-              "00:00:01",
-              "Time (in regular format: HH:MM:SS) to run log purger daily, "
-              "deleting logs older than log_retention_days.");
-#endif
-#ifdef WITH_CLOUD_AZ_INFO
-DEFINE_string(prefer_zone, "", "user preferred deployed availability zone");
-DEFINE_string(current_zone,
-              "",
-              "the log service server node deployed on currently");
-#endif
-
 DEFINE_string(log_file_name_prefix,
               "log-service.log",
               "Sets the prefix for log files. Default is 'log-service.log'");
-
-#if defined(USE_ROCKSDB_LOG_STATE) && (WITH_ROCKSDB_CLOUD == CS_TYPE_S3)
-Aws::SDKOptions aws_options;
-
-static void aws_init()
-{
-    aws_options.loggingOptions.logLevel = Aws::Utils::Logging::LogLevel::Info;
-    Aws::InitAPI(aws_options);
-}
-
-static void aws_deinit()
-{
-    Aws::ShutdownAPI(aws_options);
-}
-#endif
 
 static bool CheckCommandLineFlagIsDefault(const char *name)
 {
@@ -153,15 +97,6 @@ static bool CheckCommandLineFlagIsDefault(const char *name)
 void launch(const std::string &tt_conf,
             uint32_t node_id,
             const std::string &storage_path
-#if defined(USE_ROCKSDB_LOG_STATE) && defined(WITH_ROCKSDB_CLOUD)
-            ,
-            txlog::RocksDBCloudConfig rocksdb_cloud_config
-#endif
-#ifdef WITH_CLOUD_AZ_INFO
-            ,
-            const std::string &prefer_zone,
-            const std::string &current_zone
-#endif
 )
 {
     std::vector<std::string> ip_list;
@@ -200,26 +135,15 @@ void launch(const std::string &tt_conf,
         port_list.emplace_back(std::stoi(port));
     }
 
-    uint64_t notify_checkpointer_threshold_size =
-        txlog::parse_size(FLAGS_notify_checkpointer_threshold_size);
-#ifdef USE_ROCKSDB_LOG_STATE
     uint64_t rocksdb_target_file_size_base =
         txlog::parse_size(FLAGS_rocksdb_target_file_size_base);
-#ifndef WITH_ROCKSDB_CLOUD
     size_t rocksdb_sst_files_size_limit =
         txlog::parse_size(FLAGS_rocksdb_sst_files_size_limit);
-#endif
-#endif
     txlog::LogServer server(node_id,
                             port_list[node_id],
                             storage_path,
                             FLAGS_rocksdb_scan_threads,
-#ifdef WITH_ROCKSDB_CLOUD
-                            rocksdb_cloud_config,
-                            FLAGS_in_mem_data_log_queue_size_high_watermark,
-#else
                             rocksdb_sst_files_size_limit,
-#endif
                             FLAGS_rocksdb_max_write_buffer_number,
                             FLAGS_rocksdb_max_background_jobs,
                             rocksdb_target_file_size_base);
@@ -365,12 +289,6 @@ int main(int argc, char *argv[])
                   "local",
                   "check_replay_log_size_interval_sec",
                   FLAGS_check_replay_log_size_interval_sec);
-    FLAGS_notify_checkpointer_threshold_size =
-        !CheckCommandLineFlagIsDefault("notify_checkpointer_threshold_size")
-            ? FLAGS_notify_checkpointer_threshold_size
-            : config_reader.GetString("local",
-                                      "notify_checkpointer_threshold_size",
-                                      FLAGS_notify_checkpointer_threshold_size);
     FLAGS_enable_brpc_builtin_services =
         !CheckCommandLineFlagIsDefault("enable_brpc_builtin_services")
             ? FLAGS_enable_brpc_builtin_services
@@ -384,80 +302,6 @@ int main(int argc, char *argv[])
                                        "rocksdb_scan_threads",
                                        FLAGS_rocksdb_scan_threads);
 
-#if defined(USE_ROCKSDB_LOG_STATE) && (WITH_ROCKSDB_CLOUD == CS_TYPE_S3)
-    FLAGS_aws_access_key_id =
-        !CheckCommandLineFlagIsDefault("aws_access_key_id")
-            ? FLAGS_aws_access_key_id
-            : config_reader.GetString("rocksdb_cloud",
-                                      "aws_access_key_id",
-                                      FLAGS_aws_access_key_id);
-    FLAGS_aws_secret_key =
-        !CheckCommandLineFlagIsDefault("aws_secret_key")
-            ? FLAGS_aws_secret_key
-            : config_reader.GetString(
-                  "rocksdb_cloud", "aws_secret_key", FLAGS_aws_secret_key);
-#endif
-
-#if defined(USE_ROCKSDB_LOG_STATE) && defined(WITH_ROCKSDB_CLOUD)
-    FLAGS_region =
-        !CheckCommandLineFlagIsDefault("region")
-            ? FLAGS_region
-            : config_reader.GetString("rocksdb_cloud", "region", FLAGS_region);
-    FLAGS_bucket_name =
-        !CheckCommandLineFlagIsDefault("bucket_name")
-            ? FLAGS_bucket_name
-            : config_reader.GetString(
-                  "rocksdb_cloud", "bucket_name", FLAGS_bucket_name);
-    FLAGS_bucket_prefix =
-        !CheckCommandLineFlagIsDefault("bucket_prefix")
-            ? FLAGS_bucket_prefix
-            : config_reader.GetString(
-                  "rocksdb_cloud", "bucket_prefix", FLAGS_bucket_prefix);
-    FLAGS_sst_file_cache_size =
-        !CheckCommandLineFlagIsDefault("sst_file_cache_size")
-            ? FLAGS_sst_file_cache_size
-            : config_reader.GetString("rocksdb_cloud",
-                                      "sst_file_cache_size",
-                                      FLAGS_sst_file_cache_size);
-    FLAGS_rocksdb_cloud_ready_timeout =
-        !CheckCommandLineFlagIsDefault("rocksdb_cloud_ready_timeout")
-            ? FLAGS_rocksdb_cloud_ready_timeout
-            : config_reader.GetInteger("rocksdb_cloud",
-                                       "rocksdb_cloud_ready_timeout",
-                                       FLAGS_rocksdb_cloud_ready_timeout);
-    FLAGS_rocksdb_cloud_file_deletion_delay =
-        !CheckCommandLineFlagIsDefault("rocksdb_cloud_file_deletion_delay")
-            ? FLAGS_rocksdb_cloud_file_deletion_delay
-            : config_reader.GetInteger("rocksdb_cloud",
-                                       "rocksdb_cloud_file_deletion_delay",
-                                       FLAGS_rocksdb_cloud_file_deletion_delay);
-    FLAGS_log_retention_days =
-        !CheckCommandLineFlagIsDefault("log_retention_days")
-            ? FLAGS_log_retention_days
-            : config_reader.GetInteger("rocksdb_cloud",
-                                       "log_retention_days",
-                                       FLAGS_log_retention_days);
-    FLAGS_log_purger_schedule =
-        !CheckCommandLineFlagIsDefault("log_purger_schedule")
-            ? FLAGS_log_purger_schedule
-            : config_reader.GetString("rocksdb_cloud",
-                                      "log_purger_schedule",
-                                      FLAGS_log_purger_schedule);
-#endif
-
-#ifdef WITH_CLOUD_AZ_INFO
-    FLAGS_prefer_zone =
-        !CheckCommandLineFlagIsDefault("prefer_zone")
-            ? FLAGS_prefer_zone
-            : config_reader.GetString(
-                  "rocksdb_cloud", "prefer_zone", FLAGS_prefer_zone);
-    FLAGS_current_zone =
-        !CheckCommandLineFlagIsDefault("current_zone")
-            ? FLAGS_current_zone
-            : config_reader.GetString(
-                  "rocksdb_cloud", "current_zone", FLAGS_current_zone);
-#endif
-
     if (!FLAGS_alsologtostderr)
     {
         PrintHelloText();
@@ -466,83 +310,18 @@ int main(int argc, char *argv[])
                   << "start log group id: " << FLAGS_start_log_group_id << "; "
                   << "node_id: " << FLAGS_node_id << "; "
                   << "raft storage_path: " << FLAGS_storage_path << "; "
-#if defined(USE_ROCKSDB_LOG_STATE) && defined(WITH_ROCKSDB_CLOUD)
-                  << "log retention days: " << FLAGS_log_retention_days
-#endif
                   << std::endl;
     }
     LOG(INFO) << "log server starting... conf: " << FLAGS_conf << "; "
               << "start log group id: " << FLAGS_start_log_group_id << "; "
               << "node_id: " << FLAGS_node_id << "; "
               << "raft storage_path: " << FLAGS_storage_path << "; "
-#if defined(USE_ROCKSDB_LOG_STATE) && defined(WITH_ROCKSDB_CLOUD)
-              << "log retention days: " << FLAGS_log_retention_days
-#endif
               << std::endl;
 
-#if defined(USE_ROCKSDB_LOG_STATE) && defined(WITH_ROCKSDB_CLOUD)
-    txlog::RocksDBCloudConfig rocksdb_cloud_config;
-
-#if (WITH_ROCKSDB_CLOUD == CS_TYPE_S3)
-    aws_init();
-    rocksdb_cloud_config.aws_access_key_id_ = FLAGS_aws_access_key_id;
-    rocksdb_cloud_config.aws_secret_key_ = FLAGS_aws_secret_key;
-#endif
-
-    rocksdb_cloud_config.region_ = FLAGS_region;
-    rocksdb_cloud_config.bucket_name_ = FLAGS_bucket_name;
-    rocksdb_cloud_config.bucket_prefix_ =
-        FLAGS_bucket_prefix + std::to_string(FLAGS_start_log_group_id) + '-';
-    rocksdb_cloud_config.sst_file_cache_size_ =
-        txlog::parse_size(FLAGS_sst_file_cache_size);
-    rocksdb_cloud_config.db_ready_timeout_us_ =
-        FLAGS_rocksdb_cloud_ready_timeout * 1000 * 1000;
-    rocksdb_cloud_config.db_file_deletion_delay_ =
-        FLAGS_rocksdb_cloud_file_deletion_delay;
-    rocksdb_cloud_config.log_retention_days_ = FLAGS_log_retention_days;
-
-    std::tm log_purger_tm{};
-    std::istringstream iss(FLAGS_log_purger_schedule);
-    iss >> std::get_time(&log_purger_tm, "%H:%M:%S");
-
-    if (iss.fail())
-    {
-        LOG(ERROR)
-            << "The argument `log_purger_schedule` has invalid time format. "
-               "expected: HH:MM:SS";
-    }
-    else
-    {
-        rocksdb_cloud_config.log_purger_starting_hour_ = log_purger_tm.tm_hour;
-        rocksdb_cloud_config.log_purger_starting_minute_ = log_purger_tm.tm_min;
-        rocksdb_cloud_config.log_purger_starting_second_ = log_purger_tm.tm_sec;
-        launch(FLAGS_conf,
-               FLAGS_node_id,
-               "local://" + FLAGS_storage_path,
-               rocksdb_cloud_config
-#ifdef WITH_CLOUD_AZ_INFO
-               ,
-               FLAGS_prefer_zone,
-               FLAGS_current_zone
-#endif
-        );
-    }
-
-#else
     launch(FLAGS_conf,
            FLAGS_node_id,
            "local://" + FLAGS_storage_path
-#ifdef WITH_CLOUD_AZ_INFO
-           ,
-           FLAGS_prefer_zone,
-           FLAGS_current_zone
-#endif
     );
-#endif
-
-#if defined(USE_ROCKSDB_LOG_STATE) && (WITH_ROCKSDB_CLOUD == CS_TYPE_S3)
-    aws_deinit();
-#endif
 
     if (!FLAGS_alsologtostderr)
     {

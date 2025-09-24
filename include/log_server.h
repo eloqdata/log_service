@@ -46,18 +46,7 @@ public:
               uint16_t port,
               const std::string &storage_path,
               const size_t rocksdb_scan_threads,
-#ifdef WITH_ROCKSDB_CLOUD
-              RocksDBCloudConfig rocksdb_cloud_config,
-              // The high water mark size of the in-memory data log queue
-              // determines the threshold at which a snapshot is triggered to
-              // purge the log queue. When the size of the log queue reaches
-              // this threshold, the system initiates a snapshot operation to
-              // remove older log entries and free up memory resources
-              const size_t in_mem_data_log_queue_size_high_watermark = 50 *
-                                                                       10000,
-#else
               const size_t sst_files_size_limit = 500 * 1024 * 1024,
-#endif
               const size_t rocksdb_max_write_buffer_number = 8,
               const size_t rocksdb_max_background_jobs = 12,
               const size_t rocksdb_target_file_size_base = 64 * 1024 * 1024);

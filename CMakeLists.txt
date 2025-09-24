@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.12)
 project(log_service C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -23,9 +23,6 @@ message(NOTICE "BRPC_WITH_GLOG : ${BRPC_WITH_GLOG}")
 
 option(LINK_TCMALLOC "Link tcmalloc if possible" OFF)
 message(NOTICE "LINK_TCMALLOC : ${LINK_TCMALLOC}")
-
-option(USE_ROCKSDB_LOG_STATE "Whether use rocksdb log state or in-memory log state" ON)
-message(NOTICE "USE_ROCKSDB_LOG_STATE : ${USE_ROCKSDB_LOG_STATE}")
 
 option(WITH_ASAN "Enable memory sanitize" OFF)
 message(NOTICE "WITH ASAN: ${WITH_ASAN}")
@@ -116,40 +113,36 @@ if ((NOT LEVELDB_INCLUDE_PATH) OR (NOT LEVELDB_LIB))
 endif ()
 include_directories(${LEVELDB_INCLUDE_PATH})
 
-set(LOG_SHIPPING_THREADS_NUM 8)
-
 if (OVERRIDE_GFLAGS_NAMESPACE)
     add_compile_definitions(OVERRIDE_GFLAGS_NAMESPACE)
 endif ()
 
-if (USE_ROCKSDB_LOG_STATE)
-      find_path(ROCKSDB_INCLUDE_PATH NAMES rocksdb/db.h)
-      if (NOT ROCKSDB_INCLUDE_PATH)
-    	message(FATAL_ERROR "Fail to find RocksDB include path")
-      endif ()
-      message(STATUS "ROCKSDB_INCLUDE_PATH: ${ROCKSDB_INCLUDE_PATH}")
-
-      find_library(ROCKSDB_LIB NAMES rocksdb)
-      if (NOT ROCKSDB_LIB)
-    	  message(FATAL_ERROR "Fail to find RocksDB lib path")
-      endif ()
-      message(STATUS "ROCKSDB_LIB: ${ROCKSDB_LIB}")
-
-    set(LOG_INCLUDE_DIR
-            ${LOG_INCLUDE_DIR}
-            ${ROCKSDB_INCLUDE_PATH}
-            )
-    set(LOG_LIB
-            ${LOG_LIB}
-            ${ROCKSDB_LIB}
-            )
-
-    # add preprocessor definition USE_ROCKSDB_LOG_STATE
-    add_compile_definitions(USE_ROCKSDB_LOG_STATE)
-    # one shipping thread is enough for rocksdb version log state
-    set(LOG_SHIPPING_THREADS_NUM 1)
+find_path(ROCKSDB_INCLUDE_PATH NAMES rocksdb/db.h)
+if (NOT ROCKSDB_INCLUDE_PATH)
+message(FATAL_ERROR "Fail to find RocksDB include path")
 endif ()
+message(STATUS "ROCKSDB_INCLUDE_PATH: ${ROCKSDB_INCLUDE_PATH}")
 
+find_library(ROCKSDB_LIB NAMES rocksdb)
+if (NOT ROCKSDB_LIB)
+  message(FATAL_ERROR "Fail to find RocksDB lib path")
+endif ()
+message(STATUS "ROCKSDB_LIB: ${ROCKSDB_LIB}")
+
+set(LOG_INCLUDE_DIR
+        ${LOG_INCLUDE_DIR}
+        ${ROCKSDB_INCLUDE_PATH}
+        )
+set(LOG_LIB
+        ${LOG_LIB}
+        ${ROCKSDB_LIB}
+        )
+
+# one shipping thread is enough for rocksdb version log state
+set(LOG_SHIPPING_THREADS_NUM 1)
+
+# Add for compatiable reason
+add_compile_definitions(LOG_STATE_TYPE_RKDB)
 
 find_package(Protobuf REQUIRED)
 
@@ -205,8 +198,6 @@ if (TEST_LOG_SERVICE)
     add_executable(async_write_log_test ${LOG_SOURCE_DIR}/test/async_write_log_test.cpp)
     target_link_libraries(async_write_log_test PUBLIC logservice)
 
-    if (USE_ROCKSDB_LOG_STATE)
-       add_executable(rocksdb_test ${LOG_SOURCE_DIR}/test/rocksdb_test.cpp)
-       target_link_libraries(rocksdb_test PUBLIC logservice)
-    endif ()
+    add_executable(rocksdb_test ${LOG_SOURCE_DIR}/test/rocksdb_test.cpp)
+    target_link_libraries(rocksdb_test PUBLIC logservice)
 endif ()
