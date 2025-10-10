@@ -21,9 +21,6 @@
  */
 #pragma once
 
-#define CS_TYPE_S3 1
-#define CS_TYPE_GCS 2
-
 #include <assert.h>
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>

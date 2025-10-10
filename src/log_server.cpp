@@ -64,35 +64,18 @@ LogServer::LogServer(uint32_t node_id,
                      uint16_t port,
                      const std::string &storage_path,
                      const size_t rocksdb_scan_threads,
-#ifdef WITH_ROCKSDB_CLOUD
-                     RocksDBCloudConfig rocksdb_cloud_config,
-                     const size_t in_mem_data_log_queue_size_high_watermark,
-#else
                      const size_t sst_files_size_limit,
-#endif
                      const size_t rocksdb_max_write_buffer_number,
                      const size_t rocksdb_max_background_jobs,
                      const size_t rocksdb_target_file_size_base)
     : open_log_service_(node_id), port_(port)
 {
-#ifdef WITH_ROCKSDB_CLOUD
-    log_state_ = std::make_unique<LogStateRocksDBCloudImpl>(
-        storage_path.substr(8) + "/rocksdb",
-        rocksdb_cloud_config,
-        this,
-        in_mem_data_log_queue_size_high_watermark,
-        rocksdb_max_write_buffer_number,
-        rocksdb_max_background_jobs,
-        rocksdb_target_file_size_base,
-        rocksdb_scan_threads);
-#else
     // specify log_state rocksdb path from braft storage path, trimming
     // "local://" prefix.
     log_state_ = std::make_unique<LogStateRocksDBImpl>(
         storage_path.substr(8) + "/rocksdb",
         sst_files_size_limit,
         rocksdb_scan_threads);
-#endif
 }
 
 int LogServer::Start(bool enable_brpc_builtin_services)

@@ -22,7 +22,6 @@
 #pragma once
 
 #include <cstdint>
-#ifdef USE_ROCKSDB_LOG_STATE
 
 #include <google/protobuf/message_lite.h>
 #include <rocksdb/db.h>
@@ -473,4 +472,3 @@ private:
     LogStateRocksDBImpl *log_state_;
 };
 }  // namespace txlog
-#endif
