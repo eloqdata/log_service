@@ -68,11 +68,18 @@ public:
 
     int Start(bool enable_brpc_builtin_services = true);
 
+    const std::string &GetStoragePath() const
+    {
+        return storage_path_;
+    }
+
 private:
     brpc::Server brpc_server_;
     OpenLogServiceImpl open_log_service_;
 
     uint32_t port_;
+    std::string storage_path_;
+
     std::unique_ptr<LogState> log_state_;
 
     void SetCommandLineOptions();
