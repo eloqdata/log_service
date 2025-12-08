@@ -68,7 +68,7 @@ LogServer::LogServer(uint32_t node_id,
                      const size_t rocksdb_max_write_buffer_number,
                      const size_t rocksdb_max_background_jobs,
                      const size_t rocksdb_target_file_size_base)
-    : open_log_service_(node_id), port_(port)
+    : open_log_service_(node_id), port_(port), storage_path_(storage_path)
 {
     // specify log_state rocksdb path from braft storage path, trimming
     // "local://" prefix.
