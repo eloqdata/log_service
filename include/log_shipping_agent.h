@@ -68,8 +68,7 @@ public:
           iterator_(std::move(iterator)),
           latest_txn_no_(latest_txn_no),
           last_ckpt_ts_(last_ckpt_ts),
-          start_with_replay_(start_with_replay),
-          interrupted_(false)
+          start_with_replay_(start_with_replay)
     {
         stream_write_options_.write_in_background = true;
         thd_ = std::thread(
@@ -102,8 +101,11 @@ public:
                 }
                 while (err != 0)
                 {
-                    if (interrupted_.load(std::memory_order_acquire))
+                    if (shipping_agent_status_.load(
+                            std::memory_order_acquire) != Status::Active)
                     {
+                        shipping_agent_status_.store(Status::Terminated,
+                                                     std::memory_order_release);
                         return;
                     }
                     LOG(ERROR)
@@ -116,8 +118,11 @@ public:
 
                 while (ConnectStream() != 0)
                 {
-                    if (interrupted_.load(std::memory_order_acquire))
+                    if (shipping_agent_status_.load(
+                            std::memory_order_acquire) != Status::Active)
                     {
+                        shipping_agent_status_.store(Status::Terminated,
+                                                     std::memory_order_release);
                         return;
                     }
                     using namespace std::chrono_literals;
@@ -151,6 +156,8 @@ public:
                             LOG(ERROR) << "log group " << log_group_id_
                                        << " faild to send finish message.";
                             brpc::StreamClose(stream_id_);
+                            shipping_agent_status_.store(
+                                Status::Terminated, std::memory_order_release);
                             return;
                         }
                     }
@@ -158,7 +165,8 @@ public:
 
                 // Waits for the incoming request to send tx logs to recover
                 // orphan locks in the cc node group leader.
-                while (!interrupted_.load(std::memory_order_acquire))
+                while (shipping_agent_status_.load(std::memory_order_acquire) ==
+                       Status::Active)
                 {
                     {
                         std::unique_lock<std::mutex> lk(to_send_mux_);
@@ -167,8 +175,9 @@ public:
                             [this]()
                             {
                                 return !to_send_list_.empty() ||
-                                       interrupted_.load(
-                                           std::memory_order_acquire);
+                                       shipping_agent_status_.load(
+                                           std::memory_order_acquire) !=
+                                           Status::Active;
                             });
 
                         assert(recovered_txn_log_list_.size() == 0);
@@ -188,23 +197,44 @@ public:
                     }
                 }
                 brpc::StreamClose(stream_id_);
+                shipping_agent_status_.store(Status::Terminated,
+                                             std::memory_order_release);
             });
     }
 
     ~LogShippingAgent()
     {
+        Status expected = Status::Active;
+        if (shipping_agent_status_.compare_exchange_strong(
+                expected, Status::Terminating, std::memory_order_acq_rel))
         {
-            // The interrupt signal is set under the protection of mutex, to
-            // avoid instruction reordering and to ensure that by the time the
-            // shipping thread is notified via the condition variable, the
-            // signal is already set.
             std::unique_lock<std::mutex> lk(to_send_mux_);
-            interrupted_.store(true, std::memory_order_release);
+            to_send_cv_.notify_all();
         }
 
-        to_send_cv_.notify_all();
-        // thd_.detach();
-        thd_.join();
+        if (thd_.joinable())
+        {
+            thd_.join();
+        }
+    }
+
+    void Terminate()
+    {
+        // The log shipping worker may be already terminated when the stream is
+        // invalidated, so we need to check the status before terminating.
+        Status expected = Status::Active;
+        if (shipping_agent_status_.compare_exchange_strong(
+                expected, Status::Terminating, std::memory_order_acq_rel))
+        {
+            std::unique_lock<std::mutex> lk(to_send_mux_);
+            to_send_cv_.notify_all();
+        }
+    }
+
+    bool IsTerminated()
+    {
+        return shipping_agent_status_.load(std::memory_order_acquire) ==
+               Status::Terminated;
     }
 
     void AddLogRecord(Item::Pointer log_rec)
@@ -307,7 +337,8 @@ private:
         int eagain = 0;
         for (const auto &item : send_list)
         {
-            if (interrupted_.load(std::memory_order_acquire))
+            if (shipping_agent_status_.load(std::memory_order_acquire) !=
+                Status::Active)
             {
                 return;
             }
@@ -591,7 +622,9 @@ private:
 
         int error_code =
             brpc::StreamWrite(stream_id_, buf, &stream_write_options_);
-        while (error_code != 0 && !interrupted_.load(std::memory_order_acquire))
+        while (error_code != 0 &&
+               shipping_agent_status_.load(std::memory_order_acquire) ==
+                   Status::Active)
         {
             if (error_code == EAGAIN)
             {
@@ -628,6 +661,13 @@ private:
         // error_code == 0 or interrupted or stream invalid
         return error_code;
     }
+
+    enum struct Status
+    {
+        Active,
+        Terminating,
+        Terminated
+    };
 
     const uint32_t log_group_id_;
     const uint32_t cc_node_group_id_;
@@ -666,6 +706,6 @@ private:
     // old leader finishes log replay, the new leader's log replay request will
     // create a second log shipping agent and interruptes/de-allocates the first
     // one.
-    std::atomic<bool> interrupted_;
+    std::atomic<Status> shipping_agent_status_{Status::Active};
 };
 }  // namespace txlog

@@ -92,6 +92,15 @@ void OpenLogServiceImpl::ReplayLog(
 
     std::unique_lock<std::mutex> lk(log_replay_workers_mutex_);
 
+    if (log_replay_worker_ != nullptr)
+    {
+        log_replay_worker_->Terminate();
+        while (!log_replay_worker_->IsTerminated())
+        {
+            bthread_usleep(1000);
+        }
+    }
+
     // The new log shipping agent spawns a background thread that ships log
     // records to the recovering leader of the cc node group. When there is
     // already a shipping agent for the specified node group, either active or
