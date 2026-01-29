@@ -148,6 +148,7 @@ public:
                         finish_msg->set_log_group_id(log_group_id_);
                         finish_msg->set_latest_txn_no(latest_txn_no_);
                         finish_msg->set_last_ckpt_ts(last_ckpt_ts_);
+                        finish_msg->set_latest_commit_ts(latest_commit_ts_);
 
                         int eagain = 0;
                         if (SendMessage(replay_msg, iobuf_, true, eagain) != 0)
@@ -588,10 +589,13 @@ private:
                 global_latest_txn_no = latest_txn_no;
             }
         }
-        if (global_max_ts > last_ckpt_ts_)
+        if (latest_txn_no_ < global_latest_txn_no)
         {
-            assert(latest_txn_no_ <= global_latest_txn_no);
             latest_txn_no_ = global_latest_txn_no;
+        }
+        if (latest_commit_ts_ < global_max_ts)
+        {
+            latest_commit_ts_ = global_max_ts;
         }
 
         return data_log_send_err.load(std::memory_order_relaxed);
@@ -688,6 +692,7 @@ private:
     std::condition_variable to_send_cv_;
     uint32_t latest_txn_no_{};
     uint64_t last_ckpt_ts_{};
+    uint64_t latest_commit_ts_{};
     bool start_with_replay_;
 
     butil::IOBuf iobuf_;
